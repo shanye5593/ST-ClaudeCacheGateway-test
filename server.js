@@ -5,7 +5,10 @@ const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
 const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
-const cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '1h');
+let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '1h');
+let captureRequests = process.env.CAPTURE_REQUESTS === '1';
+const requestCaptures = [];
+const MAX_REQUEST_CAPTURES = 20;
 
 function normalizeBaseUrl(baseUrl) {
     return baseUrl.trim().replace(/\/+$/, '');
@@ -32,6 +35,10 @@ function normalizeCacheTtl(ttl) {
     return normalized;
 }
 
+function getCacheTtlLabel() {
+    return cacheTtl || 'provider-default';
+}
+
 function getCacheControl() {
     const cacheControl = { type: 'ephemeral' };
 
@@ -40,6 +47,19 @@ function getCacheControl() {
     }
 
     return cacheControl;
+}
+
+function getRuntimeState() {
+    return {
+        ok: true,
+        host,
+        port,
+        upstreamBaseUrl,
+        cacheTtl: getCacheTtlLabel(),
+        cacheControl: getCacheControl(),
+        captureRequests,
+        capturedRequests: requestCaptures.length,
+    };
 }
 
 function log(message, details = null) {
@@ -378,6 +398,34 @@ function extractUsage(responseJson) {
     };
 }
 
+function safeJsonClone(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function addRequestCapture({ originalBody, convertedBody, result }) {
+    if (!captureRequests) {
+        return null;
+    }
+
+    const capture = {
+        id: `${Date.now()}-${requestCaptures.length + 1}`,
+        capturedAt: new Date().toISOString(),
+        cacheTtl: getCacheTtlLabel(),
+        cacheControl: getCacheControl(),
+        conversion: safeJsonClone(result),
+        originalBody: safeJsonClone(originalBody),
+        convertedBody: safeJsonClone(convertedBody),
+    };
+
+    requestCaptures.unshift(capture);
+
+    if (requestCaptures.length > MAX_REQUEST_CAPTURES) {
+        requestCaptures.length = MAX_REQUEST_CAPTURES;
+    }
+
+    return capture;
+}
+
 async function readJsonRequest(request) {
     const text = await request.text();
 
@@ -436,6 +484,7 @@ async function proxyChatCompletions(request) {
 
     const convertedBody = JSON.parse(JSON.stringify(body));
     const result = applyCacheBreaks(convertedBody.messages);
+    const capture = addRequestCapture({ originalBody: body, convertedBody, result });
 
     log('Forwarding chat completion.', {
         model: convertedBody.model,
@@ -444,7 +493,8 @@ async function proxyChatCompletions(request) {
         injected: result.injected,
         removed: result.removed,
         overflowRemoved: result.overflowRemoved,
-        cacheTtl: cacheTtl || 'provider-default',
+        cacheTtl: getCacheTtlLabel(),
+        captureId: capture?.id ?? null,
     });
 
     const upstreamResponse = await fetch(url, {
@@ -493,6 +543,181 @@ function jsonResponse(body, status = 200) {
     });
 }
 
+function htmlResponse(html) {
+    return new Response(html, {
+        status: 200,
+        headers: addCorsHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })),
+    });
+}
+
+function getCaptureSummary(capture) {
+    return {
+        id: capture.id,
+        capturedAt: capture.capturedAt,
+        model: capture.convertedBody?.model ?? null,
+        stream: Boolean(capture.convertedBody?.stream),
+        messages: Array.isArray(capture.convertedBody?.messages) ? capture.convertedBody.messages.length : 0,
+        cacheTtl: capture.cacheTtl,
+        injected: capture.conversion?.injected ?? 0,
+        removed: capture.conversion?.removed ?? 0,
+        overflowRemoved: capture.conversion?.overflowRemoved ?? 0,
+    };
+}
+
+async function handleConsoleApi(request, url) {
+    if (request.method === 'GET' && url.pathname === '/console/state') {
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/cache-ttl') {
+        const body = await readJsonRequest(request);
+        cacheTtl = normalizeCacheTtl(body?.ttl || '');
+        log('Updated cache TTL from console.', { cacheTtl: getCacheTtlLabel(), cacheControl: getCacheControl() });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/capture') {
+        const body = await readJsonRequest(request);
+        captureRequests = Boolean(body?.enabled);
+        log('Updated capture setting from console.', { captureRequests });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'GET' && url.pathname === '/console/requests') {
+        return jsonResponse({ requests: requestCaptures.map(getCaptureSummary) });
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/console/requests/')) {
+        const id = decodeURIComponent(url.pathname.split('/').pop() || '');
+        const capture = requestCaptures.find((item) => item.id === id);
+
+        if (!capture) {
+            return jsonResponse({ error: 'Capture not found.' }, 404);
+        }
+
+        return jsonResponse(capture);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/clear') {
+        requestCaptures.length = 0;
+        return jsonResponse({ ok: true });
+    }
+
+    return null;
+}
+
+function getConsoleHtml() {
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ST Claude Cache Gateway Console</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 20px; line-height: 1.45; background: #111; color: #eee; }
+button, select { font: inherit; margin: 4px; padding: 6px 10px; }
+pre { background: #1d1d1d; border: 1px solid #444; border-radius: 6px; padding: 10px; overflow: auto; max-height: 45vh; }
+.card { border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 12px 0; background: #181818; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.muted { color: #aaa; }
+.request { border-top: 1px solid #333; padding: 8px 0; }
+a { color: #8ab4ff; }
+</style>
+</head>
+<body>
+<h1>ST Claude Cache Gateway Console</h1>
+<p class="muted">Local debug console. Captured requests may contain private prompts. Do not share exported JSON unless you have reviewed it.</p>
+<div class="card">
+  <h2>Runtime</h2>
+  <pre id="state">Loading...</pre>
+  <div class="row">
+    <label>Cache TTL
+      <select id="ttl">
+        <option value="">provider-default</option>
+        <option value="1h">1h</option>
+      </select>
+    </label>
+    <button id="saveTtl">Apply TTL</button>
+    <button id="refresh">Refresh</button>
+  </div>
+  <div class="row">
+    <button id="captureOn">Enable capture</button>
+    <button id="captureOff">Disable capture</button>
+    <button id="clear">Clear captured requests</button>
+  </div>
+</div>
+<div class="card">
+  <h2>Captured requests</h2>
+  <div id="requests">Loading...</div>
+</div>
+<div class="card">
+  <h2>Selected request JSON</h2>
+  <button id="download" disabled>Download selected JSON</button>
+  <pre id="details">Select a request.</pre>
+</div>
+<script>
+let selected = null;
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+function downloadJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+async function loadState() {
+  const state = await api('/console/state');
+  document.getElementById('state').textContent = JSON.stringify(state, null, 2);
+  document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
+}
+async function loadRequests() {
+  const data = await api('/console/requests');
+  const root = document.getElementById('requests');
+  if (!data.requests.length) {
+    root.textContent = 'No captured requests yet.';
+    return;
+  }
+  root.innerHTML = '';
+  for (const item of data.requests) {
+    const div = document.createElement('div');
+    div.className = 'request';
+    const button = document.createElement('button');
+    button.textContent = 'View JSON';
+    button.onclick = () => viewRequest(item.id);
+    div.append(button, ' ', item.capturedAt + ' | model=' + item.model + ' | messages=' + item.messages + ' | ttl=' + item.cacheTtl + ' | injected=' + item.injected + ' | removed=' + item.removed);
+    root.appendChild(div);
+  }
+}
+async function viewRequest(id) {
+  selected = await api('/console/requests/' + encodeURIComponent(id));
+  document.getElementById('details').textContent = JSON.stringify(selected, null, 2);
+  document.getElementById('download').disabled = false;
+}
+async function refreshAll() {
+  await loadState();
+  await loadRequests();
+}
+document.getElementById('saveTtl').onclick = async () => {
+  await api('/console/cache-ttl', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ttl: document.getElementById('ttl').value }) });
+  await refreshAll();
+};
+document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); };
+document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); };
+document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = 'Select a request.'; document.getElementById('download').disabled = true; await refreshAll(); };
+document.getElementById('refresh').onclick = refreshAll;
+document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
+refreshAll().catch((error) => { document.getElementById('state').textContent = error.message; });
+</script>
+</body>
+</html>`;
+}
+
 async function handleRequest(request) {
     const url = new URL(request.url);
 
@@ -501,6 +726,18 @@ async function handleRequest(request) {
     }
 
     try {
+        if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/console')) {
+            return htmlResponse(getConsoleHtml());
+        }
+
+        if (url.pathname.startsWith('/console/')) {
+            const consoleResponse = await handleConsoleApi(request, url);
+
+            if (consoleResponse) {
+                return consoleResponse;
+            }
+        }
+
         if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
             return await proxyChatCompletions(request);
         }
@@ -510,7 +747,7 @@ async function handleRequest(request) {
         }
 
         if (request.method === 'GET' && url.pathname === '/health') {
-            return jsonResponse({ ok: true, host, port, upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
+            return jsonResponse(getRuntimeState());
         }
 
         return jsonResponse({ error: 'Not found.' }, 404);
@@ -522,7 +759,7 @@ async function handleRequest(request) {
 
 if (typeof Bun !== 'undefined') {
     Bun.serve({ hostname: host, port, fetch: handleRequest });
-    log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
+    log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: getCacheTtlLabel() });
 } else {
     const { createServer } = await import('node:http');
 
@@ -551,6 +788,6 @@ if (typeof Bun !== 'undefined') {
 
         res.end();
     }).listen(port, host, () => {
-        log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
+        log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: getCacheTtlLabel() });
     });
 }

@@ -136,6 +136,23 @@ $env:CACHE_TTL = '1h'
 npm start
 ```
 
+## Debug console
+
+Open the local console in a browser:
+
+```text
+http://127.0.0.1:8788/console
+```
+
+The console can:
+
+- switch cache TTL between provider default and `1h` without restarting the gateway;
+- show current runtime state;
+- enable capture and store the latest converted request JSON bodies in memory;
+- download a captured JSON file for debugging.
+
+Captured requests can include private prompts. Review them before sharing.
+
 ## Health check
 
 ```sh
