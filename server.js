@@ -194,7 +194,7 @@ function transformText(text, remainingBreakpoints) {
             };
 
             if (hasMarkerAfterPart && injected < remainingBreakpoints) {
-                block.cache_control = { type: 'ephemeral' };
+                block.cache_control = getCacheControl();
                 injected++;
             }
 
@@ -205,7 +205,7 @@ function transformText(text, remainingBreakpoints) {
             const previousBlock = content[content.length - 1];
 
             if (isTextBlock(previousBlock) && !previousBlock.cache_control) {
-                previousBlock.cache_control = { type: 'ephemeral' };
+                previousBlock.cache_control = getCacheControl();
                 injected++;
             }
         }
