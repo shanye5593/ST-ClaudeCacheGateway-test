@@ -129,50 +129,66 @@ function getTextContent(content) {
     return content.map((block) => block.text).join('');
 }
 
-function findStandaloneMarkerMergeRange(messages, markerIndex) {
-    const markerRole = messages[markerIndex]?.role;
-    let startIndex = markerIndex;
-
-    for (let index = markerIndex - 1; index >= 0; index--) {
-        const message = messages[index];
-        const text = getTextContent(message?.content);
-
-        if (message?.role !== markerRole || isMarkerOnlyContent(message?.content) || text === null || !text.trim()) {
-            break;
+function addCacheControlToLastTextBlock(message) {
+    if (typeof message?.content === 'string') {
+        if (!message.content.trim()) {
+            return null;
         }
 
-        startIndex = index;
+        message.content = [{
+            type: 'text',
+            text: message.content,
+            cache_control: getCacheControl(),
+        }];
+
+        return {
+            blockIndex: 0,
+            cachedBlockTextLength: message.content[0].text.length,
+        };
     }
 
-    return startIndex < markerIndex ? { startIndex, endIndex: markerIndex - 1 } : null;
-}
-
-function mergeStandaloneMarkerPrefix(messages, markerIndex) {
-    const range = findStandaloneMarkerMergeRange(messages, markerIndex);
-
-    if (!range) {
+    if (!Array.isArray(message?.content)) {
         return null;
     }
 
-    const mergedText = messages
-        .slice(range.startIndex, range.endIndex + 1)
-        .map((message) => getTextContent(message.content))
-        .join('\n');
+    for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
+        const block = message.content[blockIndex];
 
-    messages.splice(range.startIndex, markerIndex - range.startIndex + 1, {
-        role: messages[range.startIndex].role,
-        content: [{
-            type: 'text',
-            text: mergedText,
-            cache_control: getCacheControl(),
-        }],
-    });
+        if (isTextBlock(block) && block.text.trim()) {
+            block.cache_control = getCacheControl();
+            return {
+                blockIndex,
+                cachedBlockTextLength: block.text.length,
+            };
+        }
+    }
 
-    return {
-        targetIndex: range.startIndex,
-        mergedMessageCount: range.endIndex - range.startIndex + 1,
-        cachedBlockTextLength: mergedText.length,
-    };
+    return null;
+}
+
+function applyStandaloneMarkerToPreviousMessage(messages, markerIndex) {
+    const markerRole = messages[markerIndex]?.role;
+
+    for (let index = markerIndex - 1; index >= 0; index--) {
+        const message = messages[index];
+
+        if (message?.role !== markerRole || isMarkerOnlyContent(message?.content)) {
+            continue;
+        }
+
+        const result = addCacheControlToLastTextBlock(message);
+
+        if (result) {
+            messages.splice(markerIndex, 1);
+            return {
+                targetIndex: index,
+                targetBlockIndex: result.blockIndex,
+                cachedBlockTextLength: result.cachedBlockTextLength,
+            };
+        }
+    }
+
+    return null;
 }
 
 function countExistingCacheBreakpoints(messages) {
@@ -311,22 +327,23 @@ function applyCacheBreaks(messages) {
 
         if (remainingBreakpoints > 0 && isMarkerOnlyContent(message?.content)) {
             const markerCount = countMarkersInContent(message.content);
-            const mergeResult = mergeStandaloneMarkerPrefix(messages, index);
+            const previousMessageResult = applyStandaloneMarkerToPreviousMessage(messages, index);
 
             removed += markerCount;
             changedMessages++;
 
-            if (mergeResult) {
+            if (previousMessageResult) {
                 injected++;
                 remainingBreakpoints--;
                 modifiedMessages.push({
                     index,
                     role: message.role,
-                    source: 'merged-standalone-marker',
-                    appliedTo: mergeResult.targetIndex,
-                    mergedMessageCount: mergeResult.mergedMessageCount,
-                    cachedBlockTextLength: mergeResult.cachedBlockTextLength,
+                    source: 'previous-message-standalone-marker',
+                    appliedTo: previousMessageResult.targetIndex,
+                    appliedToBlock: previousMessageResult.targetBlockIndex,
+                    cachedBlockTextLength: previousMessageResult.cachedBlockTextLength,
                 });
+                index--;
             } else {
                 indexesToRemove.push(index);
                 modifiedMessages.push({ index, role: message.role, source: 'standalone-marker', appliedTo: null });
