@@ -5,6 +5,7 @@ const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
 const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
+const cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '1h');
 
 function normalizeBaseUrl(baseUrl) {
     return baseUrl.trim().replace(/\/+$/, '');
@@ -19,6 +20,26 @@ function getApiRoot(baseUrl) {
 
 function buildApiUrl(baseUrl, path) {
     return `${getApiRoot(baseUrl)}${path}`;
+}
+
+function normalizeCacheTtl(ttl) {
+    const normalized = String(ttl || '').trim();
+
+    if (!normalized || normalized.toLowerCase() === 'default' || normalized.toLowerCase() === 'none') {
+        return '';
+    }
+
+    return normalized;
+}
+
+function getCacheControl() {
+    const cacheControl = { type: 'ephemeral' };
+
+    if (cacheTtl) {
+        cacheControl.ttl = cacheTtl;
+    }
+
+    return cacheControl;
 }
 
 function log(message, details = null) {
@@ -123,7 +144,7 @@ function mergeStandaloneMarkerPrefix(messages, markerIndex) {
         content: [{
             type: 'text',
             text: mergedText,
-            cache_control: { type: 'ephemeral' },
+            cache_control: getCacheControl(),
         }],
     });
 
@@ -423,6 +444,7 @@ async function proxyChatCompletions(request) {
         injected: result.injected,
         removed: result.removed,
         overflowRemoved: result.overflowRemoved,
+        cacheTtl: cacheTtl || 'provider-default',
     });
 
     const upstreamResponse = await fetch(url, {
@@ -488,7 +510,7 @@ async function handleRequest(request) {
         }
 
         if (request.method === 'GET' && url.pathname === '/health') {
-            return jsonResponse({ ok: true, host, port, upstreamBaseUrl });
+            return jsonResponse({ ok: true, host, port, upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
         }
 
         return jsonResponse({ error: 'Not found.' }, 404);
@@ -500,7 +522,7 @@ async function handleRequest(request) {
 
 if (typeof Bun !== 'undefined') {
     Bun.serve({ hostname: host, port, fetch: handleRequest });
-    log(`Running at http://${host}:${port}`, { upstreamBaseUrl });
+    log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
 } else {
     const { createServer } = await import('node:http');
 
@@ -529,6 +551,6 @@ if (typeof Bun !== 'undefined') {
 
         res.end();
     }).listen(port, host, () => {
-        log(`Running at http://${host}:${port}`, { upstreamBaseUrl });
+        log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: cacheTtl || 'provider-default' });
     });
 }

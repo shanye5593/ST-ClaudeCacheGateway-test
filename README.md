@@ -10,6 +10,7 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
 - Supports streaming by piping the upstream response body.
+- Defaults to `cache_control: { "type": "ephemeral", "ttl": "1h" }`.
 - Works on PC and Android Termux with Node.js 18+.
 - No dependencies.
 
@@ -32,6 +33,19 @@ The gateway removes the marker and adds:
 ```
 
 Claude supports up to 4 cache breakpoints per request. Extra markers are removed without cache control.
+
+By default the gateway sends 1-hour cache controls:
+
+```json
+{
+  "cache_control": {
+    "type": "ephemeral",
+    "ttl": "1h"
+  }
+}
+```
+
+Set `CACHE_TTL=default` or `CACHE_TTL=none` to omit `ttl` and use the provider's default ephemeral window.
 
 ## PC quick start
 
@@ -101,16 +115,24 @@ Environment variables:
 | `PORT` | `8788` | Listen port. |
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream OpenAI-compatible provider root, `/v1`, or full endpoint. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
+| `CACHE_TTL` | `1h` | Cache lifetime. Use `default` or `none` to omit `ttl`. |
 
 Examples:
 
 ```sh
-UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 npm start
+UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 CACHE_TTL=1h npm start
+```
+
+Use provider default TTL instead:
+
+```sh
+CACHE_TTL=default npm start
 ```
 
 ```powershell
 $env:UPSTREAM_BASE_URL = 'https://api.pioneer.ai'
 $env:PORT = '8788'
+$env:CACHE_TTL = '1h'
 npm start
 ```
 
