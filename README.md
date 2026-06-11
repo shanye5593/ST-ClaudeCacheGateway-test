@@ -10,7 +10,7 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
 - Supports streaming by piping the upstream response body.
-- Defaults to `cache_control: { "type": "ephemeral", "ttl": "1h" }`.
+- Defaults to provider ephemeral cache lifetime, usually about 5 minutes.
 - Works on PC and Android Termux with Node.js 18+.
 - No dependencies.
 
@@ -22,7 +22,7 @@ Put this marker after large stable prompt content:
 [[CACHE_BREAK]]
 ```
 
-The gateway removes the marker and adds:
+The gateway removes the marker and adds this by default:
 
 ```json
 {
@@ -34,18 +34,7 @@ The gateway removes the marker and adds:
 
 Claude supports up to 4 cache breakpoints per request. Extra markers are removed without cache control.
 
-By default the gateway sends 1-hour cache controls:
-
-```json
-{
-  "cache_control": {
-    "type": "ephemeral",
-    "ttl": "1h"
-  }
-}
-```
-
-Set `CACHE_TTL=default` or `CACHE_TTL=none` to omit `ttl` and use the provider's default ephemeral window.
+The default provider ephemeral window is usually about 5 minutes. If your upstream supports 1-hour cache TTL, you can opt in with `CACHE_TTL=1h` or the debug console. Pioneer currently documents `ttl: "1h"`, but OpenAI-compatible chat completions may still behave as provider-default depending on the upstream.
 
 ## PC quick start
 
@@ -115,24 +104,25 @@ Environment variables:
 | `PORT` | `8788` | Listen port. |
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream OpenAI-compatible provider root, `/v1`, or full endpoint. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
-| `CACHE_TTL` | `1h` | Cache lifetime. Use `default` or `none` to omit `ttl`. |
+| `CACHE_TTL` | empty | Cache lifetime. Empty/default/none omits `ttl`; use `1h` to try Anthropic's 1-hour TTL. |
 
 Examples:
 
 ```sh
-UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 CACHE_TTL=1h npm start
+UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 npm start
 ```
 
-Use provider default TTL instead:
+Try 1-hour TTL if your upstream supports it:
 
 ```sh
-CACHE_TTL=default npm start
+CACHE_TTL=1h npm start
 ```
 
 ```powershell
 $env:UPSTREAM_BASE_URL = 'https://api.pioneer.ai'
 $env:PORT = '8788'
-$env:CACHE_TTL = '1h'
+# Optional experimental 1-hour TTL:
+# $env:CACHE_TTL = '1h'
 npm start
 ```
 
@@ -166,7 +156,8 @@ Expected response:
   "ok": true,
   "host": "127.0.0.1",
   "port": 8788,
-  "upstreamBaseUrl": "https://api.pioneer.ai"
+  "upstreamBaseUrl": "https://api.pioneer.ai",
+  "cacheTtl": "provider-default"
 }
 ```
 

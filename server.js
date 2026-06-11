@@ -5,7 +5,7 @@ const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
 const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
-let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '1h');
+let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '');
 let captureRequests = process.env.CAPTURE_REQUESTS === '1';
 const requestCaptures = [];
 const MAX_REQUEST_CAPTURES = 20;
@@ -608,53 +608,106 @@ async function handleConsoleApi(request, url) {
 
 function getConsoleHtml() {
     return `<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ST Claude Cache Gateway Console</title>
+<title>ST Claude Cache Gateway 控制台</title>
 <style>
-body { font-family: system-ui, sans-serif; margin: 20px; line-height: 1.45; background: #111; color: #eee; }
-button, select { font: inherit; margin: 4px; padding: 6px 10px; }
-pre { background: #1d1d1d; border: 1px solid #444; border-radius: 6px; padding: 10px; overflow: auto; max-height: 45vh; }
-.card { border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 12px 0; background: #181818; }
-.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.muted { color: #aaa; }
-.request { border-top: 1px solid #333; padding: 8px 0; }
-a { color: #8ab4ff; }
+:root { color-scheme: dark; --bg: #0f1117; --panel: #181b24; --panel2: #202431; --border: #343949; --text: #edf1ff; --muted: #9aa3b8; --accent: #7aa2ff; --good: #4ade80; --warn: #facc15; --danger: #fb7185; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; background: radial-gradient(circle at top left, #1d2540 0, var(--bg) 42%); color: var(--text); }
+main { max-width: 1120px; margin: 0 auto; }
+h1 { margin: 0 0 8px; font-size: 28px; }
+h2 { margin: 0 0 12px; font-size: 18px; }
+p { margin: 6px 0; }
+button, select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: #2f5cff; border-color: #5f82ff; }
+button.danger { border-color: #7f3142; color: #ffd8df; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+select { min-width: 220px; }
+pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-radius: 12px; padding: 12px; overflow: auto; max-height: 48vh; white-space: pre-wrap; word-break: break-word; }
+.header { margin-bottom: 18px; }
+.muted { color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin: 14px 0; background: rgba(24, 27, 36, 0.92); box-shadow: 0 12px 28px rgba(0,0,0,.22); }
+.stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
+.stat .label { color: var(--muted); font-size: 12px; }
+.stat .value { margin-top: 4px; font-size: 18px; font-weight: 700; word-break: break-word; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.help { border-left: 3px solid var(--accent); padding-left: 10px; color: var(--muted); }
+.warn { border-left-color: var(--warn); }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.badge.good { color: #c8ffd9; border-color: #2f7b4a; }
+.badge.warn { color: #fff3b0; border-color: #806d1d; }
+.request { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: 10px 0; background: #141722; }
+.request-title { font-weight: 700; }
+.request-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.split { display: grid; grid-template-columns: 320px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 820px) { body { padding: 14px; } .grid, .split { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<h1>ST Claude Cache Gateway Console</h1>
-<p class="muted">Local debug console. Captured requests may contain private prompts. Do not share exported JSON unless you have reviewed it.</p>
-<div class="card">
-  <h2>Runtime</h2>
-  <pre id="state">Loading...</pre>
-  <div class="row">
-    <label>Cache TTL
-      <select id="ttl">
-        <option value="">provider-default</option>
-        <option value="1h">1h</option>
-      </select>
-    </label>
-    <button id="saveTtl">Apply TTL</button>
-    <button id="refresh">Refresh</button>
-  </div>
-  <div class="row">
-    <button id="captureOn">Enable capture</button>
-    <button id="captureOff">Disable capture</button>
-    <button id="clear">Clear captured requests</button>
-  </div>
-</div>
-<div class="card">
-  <h2>Captured requests</h2>
-  <div id="requests">Loading...</div>
-</div>
-<div class="card">
-  <h2>Selected request JSON</h2>
-  <button id="download" disabled>Download selected JSON</button>
-  <pre id="details">Select a request.</pre>
-</div>
+<main>
+  <section class="header">
+    <h1>ST Claude Cache Gateway 控制台</h1>
+    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、捕获转换后的请求 JSON。</p>
+  </section>
+
+  <section class="grid">
+    <div class="stat"><div class="label">缓存模式</div><div id="cacheTtlText" class="value">加载中</div></div>
+    <div class="stat"><div class="label">请求捕获</div><div id="captureText" class="value">加载中</div></div>
+    <div class="stat"><div class="label">已捕获数量</div><div id="countText" class="value">加载中</div></div>
+  </section>
+
+  <section class="card">
+    <h2>1. 缓存 TTL 模式</h2>
+    <p class="help">推荐默认模式：不发送 ttl，让供应商使用默认 ephemeral 窗口。Pioneer 当前实测约 5 分钟，并且命中会续期。</p>
+    <div class="row" style="margin-top: 12px;">
+      <label>当前模式
+        <select id="ttl">
+          <option value="">默认 / provider-default（推荐）</option>
+          <option value="1h">1h 实验模式</option>
+        </select>
+      </label>
+      <button id="saveTtl" class="primary">应用 TTL</button>
+      <button id="refresh">刷新状态</button>
+    </div>
+    <p class="help warn">1h 只代表网关会发送 ttl: 1h；是否真的按 1 小时生效取决于上游供应商。</p>
+  </section>
+
+  <section class="card">
+    <h2>2. 请求捕获</h2>
+    <p class="help warn">捕获的 JSON 可能包含完整 prompt / 聊天记录。默认关闭；只在排查问题时开启，分享前必须打码。</p>
+    <div class="row" style="margin-top: 12px;">
+      <button id="captureOn" class="primary">开启捕获</button>
+      <button id="captureOff">关闭捕获</button>
+      <button id="clear" class="danger">清空捕获</button>
+    </div>
+  </section>
+
+  <section class="split">
+    <div class="card">
+      <h2>3. 最近请求</h2>
+      <div id="requests" class="muted">加载中...</div>
+    </div>
+    <div class="card">
+      <h2>4. 选中的 JSON</h2>
+      <div class="row" style="margin-bottom: 10px;">
+        <button id="download" disabled>下载 JSON</button>
+        <span id="selectedHint" class="muted">请选择左侧请求</span>
+      </div>
+      <pre id="details">暂无选择。</pre>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>当前 cache_control</h2>
+    <pre id="cacheControl">加载中...</pre>
+  </section>
+</main>
 <script>
 let selected = null;
 async function api(path, options) {
@@ -671,26 +724,43 @@ function downloadJson(data, filename) {
   a.click();
   URL.revokeObjectURL(url);
 }
+function ttlLabel(value) {
+  return value === '1h' ? '1h 实验模式' : '默认 / provider-default';
+}
+function setStatus(text) {
+  document.getElementById('selectedHint').textContent = text;
+}
 async function loadState() {
   const state = await api('/console/state');
-  document.getElementById('state').textContent = JSON.stringify(state, null, 2);
+  document.getElementById('cacheTtlText').textContent = ttlLabel(state.cacheTtl);
+  document.getElementById('captureText').textContent = state.captureRequests ? '已开启' : '已关闭';
+  document.getElementById('countText').textContent = String(state.capturedRequests);
+  document.getElementById('cacheControl').textContent = JSON.stringify(state.cacheControl, null, 2);
   document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
 }
 async function loadRequests() {
   const data = await api('/console/requests');
   const root = document.getElementById('requests');
   if (!data.requests.length) {
-    root.textContent = 'No captured requests yet.';
+    root.innerHTML = '<p class="muted">还没有捕获请求。先点“开启捕获”，再从酒馆发一条消息。</p>';
     return;
   }
   root.innerHTML = '';
   for (const item of data.requests) {
     const div = document.createElement('div');
     div.className = 'request';
+    const info = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'request-title';
+    title.textContent = item.model || '未知模型';
+    const meta = document.createElement('div');
+    meta.className = 'request-meta';
+    meta.textContent = item.capturedAt + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
+    info.append(title, meta);
     const button = document.createElement('button');
-    button.textContent = 'View JSON';
+    button.textContent = '查看';
     button.onclick = () => viewRequest(item.id);
-    div.append(button, ' ', item.capturedAt + ' | model=' + item.model + ' | messages=' + item.messages + ' | ttl=' + item.cacheTtl + ' | injected=' + item.injected + ' | removed=' + item.removed);
+    div.append(info, button);
     root.appendChild(div);
   }
 }
@@ -698,6 +768,7 @@ async function viewRequest(id) {
   selected = await api('/console/requests/' + encodeURIComponent(id));
   document.getElementById('details').textContent = JSON.stringify(selected, null, 2);
   document.getElementById('download').disabled = false;
+  setStatus('已选择：' + selected.id);
 }
 async function refreshAll() {
   await loadState();
@@ -706,13 +777,14 @@ async function refreshAll() {
 document.getElementById('saveTtl').onclick = async () => {
   await api('/console/cache-ttl', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ttl: document.getElementById('ttl').value }) });
   await refreshAll();
+  setStatus('TTL 已应用');
 };
-document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); };
-document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); };
-document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = 'Select a request.'; document.getElementById('download').disabled = true; await refreshAll(); };
-document.getElementById('refresh').onclick = refreshAll;
+document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求捕获已开启'); };
+document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求捕获已关闭'); };
+document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空捕获'); };
+document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
 document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
-refreshAll().catch((error) => { document.getElementById('state').textContent = error.message; });
+refreshAll().catch((error) => { document.getElementById('cacheControl').textContent = error.message; });
 </script>
 </body>
 </html>`;
