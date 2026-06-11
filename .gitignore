@@ -1,0 +1,6 @@
+node_modules/
+.env
+*.log
+*.local
+claude-cache-*.json
+claude-cache-*.txt

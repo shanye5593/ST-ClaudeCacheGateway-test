@@ -1,0 +1,22 @@
+{
+  "name": "st-claude-cache-gateway",
+  "version": "0.1.0",
+  "description": "OpenAI-compatible local gateway that converts [[CACHE_BREAK]] markers into Claude prompt-cache cache_control blocks.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "sillytavern",
+    "claude",
+    "prompt-cache",
+    "openai-compatible",
+    "termux"
+  ],
+  "author": "shanye5593",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
