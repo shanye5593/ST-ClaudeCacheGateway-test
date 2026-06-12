@@ -6,6 +6,7 @@ const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
 let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '');
+let upstreamMode = normalizeUpstreamMode(process.env.UPSTREAM_MODE || 'openai');
 let captureRequests = process.env.CAPTURE_REQUESTS === '1';
 const requestCaptures = [];
 const MAX_REQUEST_CAPTURES = 20;
@@ -35,6 +36,11 @@ function normalizeCacheTtl(ttl) {
     return normalized;
 }
 
+function normalizeUpstreamMode(mode) {
+    const normalized = String(mode || '').trim().toLowerCase();
+    return normalized === 'anthropic' ? 'anthropic' : 'openai';
+}
+
 function getCacheTtlLabel() {
     return cacheTtl || 'provider-default';
 }
@@ -55,6 +61,7 @@ function getRuntimeState() {
         host,
         port,
         upstreamBaseUrl,
+        upstreamMode,
         cacheTtl: getCacheTtlLabel(),
         cacheControl: getCacheControl(),
         captureRequests,
@@ -419,7 +426,7 @@ function safeJsonClone(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-function addRequestCapture({ originalBody, convertedBody, result }) {
+function addRequestCapture({ originalBody, convertedBody, result, anthropicBody = null }) {
     if (!captureRequests) {
         return null;
     }
@@ -430,8 +437,10 @@ function addRequestCapture({ originalBody, convertedBody, result }) {
         cacheTtl: getCacheTtlLabel(),
         cacheControl: getCacheControl(),
         conversion: safeJsonClone(result),
+        upstreamMode,
         originalBody: safeJsonClone(originalBody),
         convertedBody: safeJsonClone(convertedBody),
+        anthropicBody: anthropicBody ? safeJsonClone(anthropicBody) : null,
     };
 
     requestCaptures.unshift(capture);
@@ -473,6 +482,22 @@ function addCorsHeaders(headers = new Headers()) {
     return headers;
 }
 
+function getAnthropicHeaders(request) {
+    const headers = getForwardHeaders(request);
+
+    if (!headers.has('x-api-key')) {
+        const authorization = headers.get('authorization');
+
+        if (authorization?.startsWith('Bearer ')) {
+            headers.set('x-api-key', authorization.slice('Bearer '.length));
+        }
+    }
+
+    headers.set('anthropic-version', process.env.ANTHROPIC_VERSION || '2023-06-01');
+    headers.delete('authorization');
+    return headers;
+}
+
 async function proxyJsonRequest(request, path) {
     const url = buildApiUrl(upstreamBaseUrl, path);
     const upstreamResponse = await fetch(url, {
@@ -489,6 +514,228 @@ async function proxyJsonRequest(request, path) {
         statusText: upstreamResponse.statusText,
         headers,
     });
+}
+
+function normalizeAnthropicContent(content) {
+    if (typeof content === 'string') {
+        return content;
+    }
+
+    if (!Array.isArray(content)) {
+        return '';
+    }
+
+    return content.map((block) => {
+        if (block?.type === 'text') {
+            return { ...block };
+        }
+
+        return { ...block };
+    });
+}
+
+function convertOpenAiToAnthropicBody(body) {
+    const system = [];
+    const messages = [];
+
+    for (const message of body.messages || []) {
+        if (message.role === 'system') {
+            const content = normalizeAnthropicContent(message.content);
+
+            if (typeof content === 'string') {
+                if (content) {
+                    system.push({ type: 'text', text: content });
+                }
+            } else {
+                system.push(...content);
+            }
+            continue;
+        }
+
+        if (message.role === 'user' || message.role === 'assistant') {
+            messages.push({
+                role: message.role,
+                content: normalizeAnthropicContent(message.content),
+            });
+        }
+    }
+
+    const anthropicBody = {
+        model: body.model,
+        max_tokens: Number(body.max_tokens) || 512,
+        messages,
+    };
+
+    if (system.length > 0) {
+        anthropicBody.system = system;
+    }
+
+    if (body.temperature !== undefined) {
+        anthropicBody.temperature = body.temperature;
+    }
+
+    if (body.top_p !== undefined) {
+        anthropicBody.top_p = body.top_p;
+    }
+
+    if (body.stop !== undefined) {
+        anthropicBody.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+    }
+
+    if (body.stream) {
+        anthropicBody.stream = true;
+    }
+
+    return anthropicBody;
+}
+
+function getOpenAiUsageFromAnthropic(usage = {}) {
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    const cacheCreation = usage.cache_creation_input_tokens ?? 0;
+    const inputTokens = usage.input_tokens ?? 0;
+
+    return {
+        prompt_tokens: inputTokens + cacheRead + cacheCreation,
+        completion_tokens: usage.output_tokens ?? 0,
+        total_tokens: inputTokens + cacheRead + cacheCreation + (usage.output_tokens ?? 0),
+        prompt_tokens_details: {
+            cached_tokens: cacheRead,
+            cache_write_tokens: cacheCreation,
+        },
+    };
+}
+
+function convertAnthropicResponseToOpenAi(json, model) {
+    const text = Array.isArray(json?.content)
+        ? json.content.filter((block) => block?.type === 'text').map((block) => block.text || '').join('')
+        : '';
+
+    return {
+        id: json?.id || `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: json?.model || model,
+        choices: [{
+            index: 0,
+            message: { role: 'assistant', content: text },
+            finish_reason: json?.stop_reason || 'stop',
+        }],
+        usage: getOpenAiUsageFromAnthropic(json?.usage || {}),
+    };
+}
+
+function convertAnthropicSseLine(line, model) {
+    if (!line.startsWith('data: ')) {
+        return line;
+    }
+
+    const data = line.slice('data: '.length);
+
+    if (data === '[DONE]') {
+        return line;
+    }
+
+    try {
+        const event = JSON.parse(data);
+
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+            return `data: ${JSON.stringify({
+                id: 'chatcmpl-anthropic-stream',
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{ index: 0, delta: { content: event.delta.text }, finish_reason: null }],
+            })}`;
+        }
+
+        if (event.type === 'message_stop') {
+            return 'data: [DONE]';
+        }
+    } catch {}
+
+    return '';
+}
+
+function convertAnthropicStreamToOpenAi(stream, model) {
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = '';
+
+    return new ReadableStream({
+        async start(controller) {
+            const reader = stream.getReader();
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+
+                    if (done) {
+                        break;
+                    }
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        const converted = convertAnthropicSseLine(line.trimEnd(), model);
+
+                        if (converted) {
+                            controller.enqueue(encoder.encode(`${converted}\n\n`));
+                        }
+                    }
+                }
+            } finally {
+                controller.close();
+            }
+        },
+    });
+}
+
+async function proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture) {
+    const anthropicBody = convertOpenAiToAnthropicBody(convertedBody);
+
+    if (capture) {
+        capture.anthropicBody = safeJsonClone(anthropicBody);
+    }
+
+    const upstreamResponse = await fetch(buildApiUrl(upstreamBaseUrl, '/v1/messages'), {
+        method: 'POST',
+        headers: getAnthropicHeaders(request),
+        body: JSON.stringify(anthropicBody),
+    });
+
+    if (anthropicBody.stream) {
+        const headers = addCorsHeaders(new Headers({
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+        }));
+
+        return new Response(convertAnthropicStreamToOpenAi(upstreamResponse.body, anthropicBody.model), {
+            status: upstreamResponse.status,
+            statusText: upstreamResponse.statusText,
+            headers,
+        });
+    }
+
+    const text = await upstreamResponse.text();
+    let json = null;
+
+    try {
+        json = JSON.parse(text);
+    } catch {}
+
+    if (!upstreamResponse.ok) {
+        return new Response(text, {
+            status: upstreamResponse.status,
+            statusText: upstreamResponse.statusText,
+            headers: addCorsHeaders(new Headers({
+                'content-type': upstreamResponse.headers.get('content-type') || 'application/json',
+            })),
+        });
+    }
+
+    return jsonResponse(convertAnthropicResponseToOpenAi(json, anthropicBody.model));
 }
 
 async function proxyChatCompletions(request) {
@@ -511,8 +758,13 @@ async function proxyChatCompletions(request) {
         removed: result.removed,
         overflowRemoved: result.overflowRemoved,
         cacheTtl: getCacheTtlLabel(),
+        upstreamMode,
         captureId: capture?.id ?? null,
     });
+
+    if (upstreamMode === 'anthropic') {
+        return proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture);
+    }
 
     const upstreamResponse = await fetch(url, {
         method: 'POST',
@@ -575,6 +827,7 @@ function getCaptureSummary(capture) {
         stream: Boolean(capture.convertedBody?.stream),
         messages: Array.isArray(capture.convertedBody?.messages) ? capture.convertedBody.messages.length : 0,
         cacheTtl: capture.cacheTtl,
+        upstreamMode: capture.upstreamMode,
         injected: capture.conversion?.injected ?? 0,
         removed: capture.conversion?.removed ?? 0,
         overflowRemoved: capture.conversion?.overflowRemoved ?? 0,
@@ -590,6 +843,13 @@ async function handleConsoleApi(request, url) {
         const body = await readJsonRequest(request);
         cacheTtl = normalizeCacheTtl(body?.ttl || '');
         log('Updated cache TTL from console.', { cacheTtl: getCacheTtlLabel(), cacheControl: getCacheControl() });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/upstream-mode') {
+        const body = await readJsonRequest(request);
+        upstreamMode = normalizeUpstreamMode(body?.mode || 'openai');
+        log('Updated upstream mode from console.', { upstreamMode });
         return jsonResponse(getRuntimeState());
     }
 
@@ -675,8 +935,8 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 
   <section class="grid">
     <div class="stat"><div class="label">缓存模式</div><div id="cacheTtlText" class="value">加载中</div></div>
+    <div class="stat"><div class="label">上游格式</div><div id="upstreamModeText" class="value">加载中</div></div>
     <div class="stat"><div class="label">请求捕获</div><div id="captureText" class="value">加载中</div></div>
-    <div class="stat"><div class="label">已捕获数量</div><div id="countText" class="value">加载中</div></div>
   </section>
 
   <section class="card">
@@ -696,7 +956,22 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
   </section>
 
   <section class="card">
-    <h2>2. 请求捕获</h2>
+    <h2>2. 上游请求格式</h2>
+    <p class="help">默认 OpenAI-compatible 会原样转发到 /v1/chat/completions。Anthropic native 实验模式会把酒馆请求转换成 /v1/messages，再把响应转回 OpenAI-compatible。</p>
+    <div class="row" style="margin-top: 12px;">
+      <label>当前上游格式
+        <select id="upstreamMode">
+          <option value="openai">OpenAI-compatible（推荐默认）</option>
+          <option value="anthropic">Anthropic native /v1/messages（实验）</option>
+        </select>
+      </label>
+      <button id="saveUpstreamMode" class="primary">应用上游格式</button>
+    </div>
+    <p class="help warn">Anthropic native 模式用于测试 1h TTL；工具调用等高级能力暂不保证完整兼容。</p>
+  </section>
+
+  <section class="card">
+    <h2>3. 请求捕获</h2>
     <p class="help warn">捕获的 JSON 可能包含完整 prompt / 聊天记录。默认关闭；只在排查问题时开启，分享前必须打码。</p>
     <div class="row" style="margin-top: 12px;">
       <button id="captureOn" class="primary">开启捕获</button>
@@ -707,11 +982,11 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 
   <section class="split">
     <div class="card">
-      <h2>3. 最近请求</h2>
+      <h2>4. 最近请求</h2>
       <div id="requests" class="muted">加载中...</div>
     </div>
     <div class="card">
-      <h2>4. 选中的 JSON</h2>
+      <h2>5. 选中的 JSON</h2>
       <div class="row" style="margin-bottom: 10px;">
         <button id="download" disabled>下载 JSON</button>
         <span id="selectedHint" class="muted">请选择左侧请求</span>
@@ -744,16 +1019,20 @@ function downloadJson(data, filename) {
 function ttlLabel(value) {
   return value === '1h' ? '1h 实验模式' : '默认 / provider-default';
 }
+function upstreamModeLabel(value) {
+  return value === 'anthropic' ? 'Anthropic native' : 'OpenAI-compatible';
+}
 function setStatus(text) {
   document.getElementById('selectedHint').textContent = text;
 }
 async function loadState() {
   const state = await api('/console/state');
   document.getElementById('cacheTtlText').textContent = ttlLabel(state.cacheTtl);
-  document.getElementById('captureText').textContent = state.captureRequests ? '已开启' : '已关闭';
-  document.getElementById('countText').textContent = String(state.capturedRequests);
-  document.getElementById('cacheControl').textContent = JSON.stringify(state.cacheControl, null, 2);
+  document.getElementById('upstreamModeText').textContent = upstreamModeLabel(state.upstreamMode);
+  document.getElementById('captureText').textContent = (state.captureRequests ? '已开启' : '已关闭') + ' / ' + state.capturedRequests;
+  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl }, null, 2);
   document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
+  document.getElementById('upstreamMode').value = state.upstreamMode;
 }
 async function loadRequests() {
   const data = await api('/console/requests');
@@ -772,7 +1051,7 @@ async function loadRequests() {
     title.textContent = item.model || '未知模型';
     const meta = document.createElement('div');
     meta.className = 'request-meta';
-    meta.textContent = item.capturedAt + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
+    meta.textContent = item.capturedAt + ' · ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
     info.append(title, meta);
     const button = document.createElement('button');
     button.textContent = '查看';
@@ -795,6 +1074,11 @@ document.getElementById('saveTtl').onclick = async () => {
   await api('/console/cache-ttl', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ttl: document.getElementById('ttl').value }) });
   await refreshAll();
   setStatus('TTL 已应用');
+};
+document.getElementById('saveUpstreamMode').onclick = async () => {
+  await api('/console/upstream-mode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: document.getElementById('upstreamMode').value }) });
+  await refreshAll();
+  setStatus('上游格式已应用');
 };
 document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求捕获已开启'); };
 document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求捕获已关闭'); };
