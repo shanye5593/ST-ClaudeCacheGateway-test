@@ -1,12 +1,14 @@
 # ST Claude Cache Gateway
 
-OpenAI-compatible local gateway for SillyTavern. It converts `[[CACHE_BREAK]]` markers into Claude prompt-cache `cache_control` blocks immediately before forwarding requests to an upstream provider such as Pioneer.
+Local gateway for SillyTavern. It converts `[[CACHE_BREAK]]` markers into Claude prompt-cache `cache_control` blocks immediately before forwarding requests to an upstream provider such as Pioneer.
 
 This route keeps SillyTavern's normal send flow intact, so memory/world-info/regex/prompt plugins can finish their normal interception before the final request reaches this gateway.
 
 ## Features
 
-- `POST /v1/chat/completions` forwards chat completions after converting markers.
+- `POST /v1/chat/completions` accepts SillyTavern/OpenAI-compatible chat completions after converting markers.
+- Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility.
+- Can switch back to OpenAI-compatible upstream mode with `UPSTREAM_MODE=openai` or the debug console.
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
 - Supports streaming by piping the upstream response body.
@@ -102,7 +104,8 @@ Environment variables:
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Listen host. Use `0.0.0.0` for LAN access. |
 | `PORT` | `8788` | Listen port. |
-| `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream OpenAI-compatible provider root, `/v1`, or full endpoint. |
+| `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream provider root, `/v1`, or full endpoint. |
+| `UPSTREAM_MODE` | `anthropic` | Upstream request format. `anthropic` converts chat completions to Claude native `/v1/messages`; `openai` forwards to `/v1/chat/completions`. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
 | `CACHE_TTL` | empty | Cache lifetime. Empty/default/none omits `ttl`; use `1h` to try Anthropic's 1-hour TTL. |
 
@@ -110,6 +113,12 @@ Examples:
 
 ```sh
 UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 npm start
+```
+
+Use OpenAI-compatible upstream mode if your provider/model does not support Claude native `/v1/messages`:
+
+```sh
+UPSTREAM_MODE=openai npm start
 ```
 
 Try 1-hour TTL if your upstream supports it:
@@ -137,6 +146,7 @@ http://127.0.0.1:8788/console
 The console can:
 
 - switch cache TTL between provider default and `1h` without restarting the gateway;
+- switch upstream request format between Anthropic native and OpenAI-compatible without restarting the gateway;
 - show current runtime state;
 - enable capture and store the latest converted request JSON bodies in memory;
 - download a captured JSON file for debugging.
@@ -157,6 +167,7 @@ Expected response:
   "host": "127.0.0.1",
   "port": 8788,
   "upstreamBaseUrl": "https://api.pioneer.ai",
+  "upstreamMode": "anthropic",
   "cacheTtl": "provider-default"
 }
 ```

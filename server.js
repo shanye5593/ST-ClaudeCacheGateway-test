@@ -6,7 +6,7 @@ const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
 let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '');
-let upstreamMode = normalizeUpstreamMode(process.env.UPSTREAM_MODE || 'openai');
+let upstreamMode = normalizeUpstreamMode(process.env.UPSTREAM_MODE || 'anthropic');
 let captureRequests = process.env.CAPTURE_REQUESTS === '1';
 const requestCaptures = [];
 const MAX_REQUEST_CAPTURES = 20;
@@ -848,7 +848,7 @@ async function handleConsoleApi(request, url) {
 
     if (request.method === 'POST' && url.pathname === '/console/upstream-mode') {
         const body = await readJsonRequest(request);
-        upstreamMode = normalizeUpstreamMode(body?.mode || 'openai');
+        upstreamMode = normalizeUpstreamMode(body?.mode || 'anthropic');
         log('Updated upstream mode from console.', { upstreamMode });
         return jsonResponse(getRuntimeState());
     }
@@ -957,17 +957,17 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 
   <section class="card">
     <h2>2. 上游请求格式</h2>
-    <p class="help">默认 OpenAI-compatible 会原样转发到 /v1/chat/completions。Anthropic native 实验模式会把酒馆请求转换成 /v1/messages，再把响应转回 OpenAI-compatible。</p>
+    <p class="help">默认 Anthropic native 会把酒馆 OpenAI-compatible 请求转换成 /v1/messages，这是当前验证 1h TTL 成功的 Claude 官方格式。需要兼容其他上游时，可切回 OpenAI-compatible。</p>
     <div class="row" style="margin-top: 12px;">
       <label>当前上游格式
         <select id="upstreamMode">
-          <option value="openai">OpenAI-compatible（推荐默认）</option>
-          <option value="anthropic">Anthropic native /v1/messages（实验）</option>
+          <option value="anthropic">Anthropic native /v1/messages（默认推荐）</option>
+          <option value="openai">OpenAI-compatible（兼容模式）</option>
         </select>
       </label>
       <button id="saveUpstreamMode" class="primary">应用上游格式</button>
     </div>
-    <p class="help warn">Anthropic native 模式用于测试 1h TTL；工具调用等高级能力暂不保证完整兼容。</p>
+    <p class="help warn">Anthropic native 是 Claude 缓存推荐模式；工具调用等高级能力暂不保证完整兼容。OpenAI-compatible 会保留作为切换选项。</p>
   </section>
 
   <section class="card">
@@ -1020,7 +1020,7 @@ function ttlLabel(value) {
   return value === '1h' ? '1h 实验模式' : '默认 / provider-default';
 }
 function upstreamModeLabel(value) {
-  return value === 'anthropic' ? 'Anthropic native' : 'OpenAI-compatible';
+  return value === 'anthropic' ? 'Anthropic native（默认推荐）' : 'OpenAI-compatible（兼容模式）';
 }
 function setStatus(text) {
   document.getElementById('selectedHint').textContent = text;
