@@ -7,8 +7,8 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 ## Features
 
 - `POST /v1/chat/completions` accepts SillyTavern/OpenAI-compatible chat completions after converting markers.
-- `POST /v1/messages` accepts Claude/Anthropic-compatible requests after converting markers.
-- Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility.
+- Claude/Anthropic-compatible inbound (`POST /v1/messages`) is intentionally disabled because SillyTavern Claude-compatible requests may repeatedly rewrite cache.
+- Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility after receiving OpenAI-compatible inbound requests.
 - Can switch back to OpenAI-compatible upstream mode with `UPSTREAM_MODE=openai` or the debug console.
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
@@ -51,7 +51,7 @@ npm start
 By default it listens on:
 
 ```text
-http://127.0.0.1:8788
+http://127.0.0.1:8789
 ```
 
 and forwards to:
@@ -60,21 +60,15 @@ and forwards to:
 https://api.pioneer.ai
 ```
 
-In SillyTavern OpenAI-compatible / Chat Completion settings:
+Recommended SillyTavern setup: use OpenAI-compatible / Chat Completion settings, while keeping this gateway's upstream format as Anthropic native in the console.
 
 ```text
-Base URL: http://127.0.0.1:8788
+Base URL: http://127.0.0.1:8789
 API Key:  your Pioneer API key
 Model:    your Pioneer model name
 ```
 
-In SillyTavern Claude/Anthropic-compatible settings, use the same local base URL:
-
-```text
-Base URL: http://127.0.0.1:8788
-API Key:  your Pioneer API key
-Model:    your Claude model name
-```
+Do not use SillyTavern Claude/Anthropic-compatible settings with this gateway. That inbound route is disabled because it may repeatedly rewrite cache in SillyTavern tests.
 
 ## Termux quick start
 
@@ -89,7 +83,7 @@ npm start
 If SillyTavern runs on the same Termux/Android device, use:
 
 ```text
-Base URL: http://127.0.0.1:8788
+Base URL: http://127.0.0.1:8789
 ```
 
 If another device needs to connect to the Termux phone, bind to all interfaces:
@@ -101,7 +95,7 @@ HOST=0.0.0.0 npm start
 Then use the phone's LAN IP in SillyTavern:
 
 ```text
-Base URL: http://PHONE_LAN_IP:8788
+Base URL: http://PHONE_LAN_IP:8789
 ```
 
 Only do this on a trusted private network. Anyone who can reach the gateway can send requests through it if they also have an API key or if `UPSTREAM_API_KEY` is set.
@@ -113,7 +107,7 @@ Environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Listen host. Use `0.0.0.0` for LAN access. |
-| `PORT` | `8788` | Listen port. |
+| `PORT` | `8789` | Listen port. |
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream provider root, `/v1`, or full endpoint. |
 | `UPSTREAM_MODE` | `anthropic` | Upstream request format. `anthropic` converts chat completions to Claude native `/v1/messages`; `openai` forwards to `/v1/chat/completions`. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
@@ -122,7 +116,7 @@ Environment variables:
 Examples:
 
 ```sh
-UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 npm start
+UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8789 npm start
 ```
 
 Use OpenAI-compatible upstream mode if your provider/model does not support Claude native `/v1/messages`:
@@ -131,7 +125,7 @@ Use OpenAI-compatible upstream mode if your provider/model does not support Clau
 UPSTREAM_MODE=openai npm start
 ```
 
-Note: Claude/Anthropic-compatible inbound `POST /v1/messages` requires Anthropic upstream mode. OpenAI-compatible inbound `POST /v1/chat/completions` can use either upstream mode.
+Note: Claude/Anthropic-compatible inbound `POST /v1/messages` and `POST /v1/messages/count_tokens` are disabled. Use OpenAI-compatible inbound `POST /v1/chat/completions`; it can use either upstream mode, with Anthropic native recommended for Claude cache.
 
 Use provider-default cache TTL if your upstream/model does not support `1h`:
 
@@ -141,7 +135,7 @@ CACHE_TTL=default npm start
 
 ```powershell
 $env:UPSTREAM_BASE_URL = 'https://api.pioneer.ai'
-$env:PORT = '8788'
+$env:PORT = '8789'
 # Optional: omit ttl and use provider default cache lifetime
 # $env:CACHE_TTL = 'default'
 npm start
@@ -152,7 +146,7 @@ npm start
 Open the local console in a browser:
 
 ```text
-http://127.0.0.1:8788/console
+http://127.0.0.1:8789/console
 ```
 
 The console can:
@@ -164,14 +158,27 @@ The console can:
 - enable diagnostics and store the latest request records in memory;
 - record the exact final upstream request body that the gateway sends, including model/system/messages/tools/thinking and other parameters;
 - summarize cache-control path, prefix hash, suffix hash, response status, and cache read/write token usage when the upstream returns usage fields;
+- enable memory-only Force Prefix Lock;
 - download a diagnostic JSON file for debugging.
 
 Diagnostic records can include private prompts. Diagnostics are always off when the gateway starts. API-key headers are redacted, but request bodies are intentionally kept intact for cache debugging.
 
+## Force Prefix Lock
+
+Force Prefix Lock is an optional safety feature for unstable or incorrectly placed cache prefixes. It is off by default and only stored in memory.
+
+When enabled:
+
+1. The first final upstream request that contains a `cache_control` block teaches the gateway the locked prefix from the beginning of the prompt through the first `cache_control`.
+2. Later requests discard their current prefix and send the locked prefix plus the current suffix after the first `cache_control`.
+3. This is replacement, not append, so the same world-info/system prompt is not duplicated.
+
+Clear the lock after changing character cards, world-info, presets, chats, or any content that should live before the cache marker. Dynamic memory should be placed after `[[CACHE_BREAK]]` if you want it to keep changing.
+
 ## Health check
 
 ```sh
-curl http://127.0.0.1:8788/health
+curl http://127.0.0.1:8789/health
 ```
 
 Expected response:
@@ -180,7 +187,7 @@ Expected response:
 {
   "ok": true,
   "host": "127.0.0.1",
-  "port": 8788,
+  "port": 8789,
   "upstreamBaseUrl": "https://api.pioneer.ai",
   "upstreamMode": "anthropic",
   "cacheTtl": "1h"

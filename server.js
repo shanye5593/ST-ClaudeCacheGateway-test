@@ -7,12 +7,21 @@ const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
 const SETTINGS_FILE = new URL('./gateway-settings.json', import.meta.url);
 const runtimeSettings = loadRuntimeSettings();
 
-const port = Number(process.env.PORT || 8788);
+const DEFAULT_PORT = 8789;
+const port = Number(process.env.PORT || DEFAULT_PORT);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
 let cacheTtl = normalizeCacheTtl(getRuntimeConfigValue('CACHE_TTL', runtimeSettings.cacheTtl, '1h'));
 let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode, 'anthropic'));
 let captureRequests = false;
+let prefixLockEnabled = false;
+let prefixLock = null;
+const prefixLockStats = {
+    replacements: 0,
+    lastAction: 'disabled',
+    lastSkipReason: null,
+    lastAppliedAt: null,
+};
 const requestCaptures = [];
 const MAX_REQUEST_CAPTURES = 20;
 
@@ -101,6 +110,15 @@ function getRuntimeState() {
         cacheControl: getCacheControl(),
         captureRequests,
         capturedRequests: requestCaptures.length,
+        anthropicInboundEnabled: false,
+        prefixLockEnabled,
+        prefixLockActive: Boolean(prefixLock),
+        prefixLockHash: prefixLock?.prefixHash ?? null,
+        prefixLockCreatedAt: prefixLock?.createdAt ?? null,
+        prefixLockFirstCacheControlPath: prefixLock?.firstCacheControlPath ?? null,
+        prefixLockReplacements: prefixLockStats.replacements,
+        prefixLockLastAction: prefixLockStats.lastAction,
+        prefixLockLastSkipReason: prefixLockStats.lastSkipReason,
     };
 }
 
@@ -541,7 +559,9 @@ function getCacheSegments(body, mode) {
     const segments = [];
 
     if (mode === 'anthropic') {
-        segments.push(...getContentSegments(body?.system, 'system'));
+        for (const segment of getContentSegments(body?.system, 'system')) {
+            segments.push({ ...segment, groupKey: 'system' });
+        }
 
         for (let messageIndex = 0; messageIndex < (body?.messages || []).length; messageIndex++) {
             const message = body.messages[messageIndex];
@@ -551,6 +571,8 @@ function getCacheSegments(body, mode) {
                 segments.push({
                     ...segment,
                     role: message?.role || null,
+                    groupKey: `message:${messageIndex}`,
+                    messageMeta: message ? { ...message, content: undefined } : null,
                 });
             }
         }
@@ -566,11 +588,21 @@ function getCacheSegments(body, mode) {
             segments.push({
                 ...segment,
                 role: message?.role || null,
+                groupKey: `message:${messageIndex}`,
+                messageMeta: message ? { ...message, content: undefined } : null,
             });
         }
     }
 
     return segments;
+}
+
+function getSegmentHash(segments) {
+    return hashText(JSON.stringify(segments.map((segment) => segment.value)));
+}
+
+function getSegmentLength(segments) {
+    return JSON.stringify(segments.map((segment) => segment.value)).length;
 }
 
 function getCacheDiagnostics(body, mode) {
@@ -579,8 +611,6 @@ function getCacheDiagnostics(body, mode) {
     const cacheControlCount = segments.reduce((total, segment) => total + (segment.cacheControl ? 1 : 0), 0);
     const prefixSegments = firstCacheIndex >= 0 ? segments.slice(0, firstCacheIndex + 1) : [];
     const suffixSegments = firstCacheIndex >= 0 ? segments.slice(firstCacheIndex + 1) : segments;
-    const prefixText = JSON.stringify(prefixSegments.map((segment) => segment.value));
-    const suffixText = JSON.stringify(suffixSegments.map((segment) => segment.value));
 
     return {
         bodyHash: getBodyHash(body),
@@ -588,12 +618,229 @@ function getCacheDiagnostics(body, mode) {
         cacheControlCount,
         firstCacheControlPath: firstCacheIndex >= 0 ? `${segments[firstCacheIndex].path}.cache_control` : null,
         firstCacheControl: firstCacheIndex >= 0 ? safeJsonClone(segments[firstCacheIndex].cacheControl) : null,
-        prefixHash: firstCacheIndex >= 0 ? hashText(prefixText) : null,
-        prefixLength: firstCacheIndex >= 0 ? prefixText.length : 0,
+        prefixHash: firstCacheIndex >= 0 ? getSegmentHash(prefixSegments) : null,
+        prefixLength: firstCacheIndex >= 0 ? getSegmentLength(prefixSegments) : 0,
         prefixBlockCount: prefixSegments.length,
-        suffixHash: hashText(suffixText),
-        suffixLength: suffixText.length,
+        suffixHash: getSegmentHash(suffixSegments),
+        suffixLength: getSegmentLength(suffixSegments),
         suffixBlockCount: suffixSegments.length,
+    };
+}
+
+function splitBodyAtFirstCacheControl(body, mode) {
+    const segments = getCacheSegments(body, mode);
+    const firstCacheIndex = segments.findIndex((segment) => segment.cacheControl);
+
+    if (firstCacheIndex < 0) {
+        return { ok: false, reason: 'no-cache-control' };
+    }
+
+    const prefixSegments = safeJsonClone(segments.slice(0, firstCacheIndex + 1));
+    const suffixSegments = safeJsonClone(segments.slice(firstCacheIndex + 1));
+
+    return {
+        ok: true,
+        prefixSegments,
+        suffixSegments,
+        firstCacheControlPath: `${segments[firstCacheIndex].path}.cache_control`,
+        prefixHash: getSegmentHash(prefixSegments),
+        prefixLength: getSegmentLength(prefixSegments),
+        prefixBlockCount: prefixSegments.length,
+        suffixHash: getSegmentHash(suffixSegments),
+        suffixLength: getSegmentLength(suffixSegments),
+        suffixBlockCount: suffixSegments.length,
+    };
+}
+
+function buildContentFromValues(values) {
+    if (values.every((value) => typeof value === 'string')) {
+        return values.join('');
+    }
+
+    return values.map((value) => (typeof value === 'string' ? { type: 'text', text: value } : safeJsonClone(value)));
+}
+
+function buildAnthropicBodyFromSegments(body, segments) {
+    const nextBody = safeJsonClone(body);
+    const systemSegments = [];
+    const messages = [];
+    let currentMessage = null;
+
+    delete nextBody.system;
+    nextBody.messages = messages;
+
+    for (const segment of segments) {
+        if (segment.path.startsWith('system')) {
+            systemSegments.push(safeJsonClone(segment.value));
+            continue;
+        }
+
+        if (!currentMessage || currentMessage.groupKey !== segment.groupKey) {
+            currentMessage = {
+                ...(safeJsonClone(segment.messageMeta) || {}),
+                role: segment.role || 'user',
+                content: [],
+                groupKey: segment.groupKey,
+            };
+            messages.push(currentMessage);
+        }
+
+        currentMessage.content.push(safeJsonClone(segment.value));
+    }
+
+    for (const message of messages) {
+        message.content = buildContentFromValues(message.content);
+        delete message.groupKey;
+    }
+
+    if (systemSegments.length > 0) {
+        nextBody.system = buildContentFromValues(systemSegments);
+    }
+
+    return nextBody;
+}
+
+function buildOpenAiBodyFromSegments(body, segments) {
+    const nextBody = safeJsonClone(body);
+    const messages = [];
+    let currentMessage = null;
+
+    nextBody.messages = messages;
+
+    for (const segment of segments) {
+        if (!currentMessage || currentMessage.groupKey !== segment.groupKey) {
+            currentMessage = {
+                ...(safeJsonClone(segment.messageMeta) || {}),
+                role: segment.role || 'user',
+                content: [],
+                groupKey: segment.groupKey,
+            };
+            messages.push(currentMessage);
+        }
+
+        currentMessage.content.push(safeJsonClone(segment.value));
+    }
+
+    for (const message of messages) {
+        message.content = buildContentFromValues(message.content);
+        delete message.groupKey;
+    }
+
+    return nextBody;
+}
+
+function buildBodyFromSegments(body, mode, segments) {
+    return mode === 'anthropic'
+        ? buildAnthropicBodyFromSegments(body, segments)
+        : buildOpenAiBodyFromSegments(body, segments);
+}
+
+function rememberPrefixLock(split, mode) {
+    prefixLock = {
+        mode,
+        prefixSegments: safeJsonClone(split.prefixSegments),
+        prefixHash: split.prefixHash,
+        prefixLength: split.prefixLength,
+        prefixBlockCount: split.prefixBlockCount,
+        firstCacheControlPath: split.firstCacheControlPath,
+        createdAt: new Date().toISOString(),
+    };
+}
+
+function updatePrefixLockStats(action, reason = null) {
+    prefixLockStats.lastAction = action;
+    prefixLockStats.lastSkipReason = reason;
+    prefixLockStats.lastAppliedAt = new Date().toISOString();
+
+    if (action === 'replaced') {
+        prefixLockStats.replacements++;
+    }
+}
+
+function clearPrefixLock() {
+    prefixLock = null;
+    prefixLockStats.replacements = 0;
+    updatePrefixLockStats(prefixLockEnabled ? 'cleared' : 'disabled');
+}
+
+function applyPrefixLock(body, mode) {
+    if (!prefixLockEnabled) {
+        updatePrefixLockStats('disabled');
+        return { body, diagnostics: { enabled: false, action: 'disabled' } };
+    }
+
+    const split = splitBodyAtFirstCacheControl(body, mode);
+
+    if (!split.ok) {
+        updatePrefixLockStats('skipped', split.reason);
+        return {
+            body,
+            diagnostics: {
+                enabled: true,
+                locked: Boolean(prefixLock),
+                action: 'skipped',
+                reason: split.reason,
+            },
+        };
+    }
+
+    if (!prefixLock) {
+        rememberPrefixLock(split, mode);
+        updatePrefixLockStats('created');
+        return {
+            body,
+            diagnostics: {
+                enabled: true,
+                locked: true,
+                action: 'created',
+                prefixHash: split.prefixHash,
+                prefixLength: split.prefixLength,
+                prefixBlockCount: split.prefixBlockCount,
+                suffixHash: split.suffixHash,
+                suffixLength: split.suffixLength,
+                firstCacheControlPath: split.firstCacheControlPath,
+            },
+        };
+    }
+
+    if (prefixLock.mode !== mode) {
+        updatePrefixLockStats('skipped', 'mode-mismatch');
+        return {
+            body,
+            diagnostics: {
+                enabled: true,
+                locked: true,
+                action: 'skipped',
+                reason: 'mode-mismatch',
+                lockedMode: prefixLock.mode,
+                currentMode: mode,
+            },
+        };
+    }
+
+    const nextSegments = [
+        ...safeJsonClone(prefixLock.prefixSegments),
+        ...safeJsonClone(split.suffixSegments),
+    ];
+    const nextBody = buildBodyFromSegments(body, mode, nextSegments);
+    const nextSplit = splitBodyAtFirstCacheControl(nextBody, mode);
+    updatePrefixLockStats('replaced');
+
+    return {
+        body: nextBody,
+        diagnostics: {
+            enabled: true,
+            locked: true,
+            action: 'replaced',
+            currentPrefixHash: split.prefixHash,
+            lockedPrefixHash: prefixLock.prefixHash,
+            finalPrefixHash: nextSplit.ok ? nextSplit.prefixHash : null,
+            suffixHash: split.suffixHash,
+            suffixLength: split.suffixLength,
+            currentPrefixDiscarded: true,
+            firstCacheControlPath: nextSplit.ok ? nextSplit.firstCacheControlPath : prefixLock.firstCacheControlPath,
+            replacements: prefixLockStats.replacements,
+        },
     };
 }
 
@@ -1102,7 +1349,14 @@ function convertAnthropicStreamToOpenAi(stream, model) {
 }
 
 async function proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture) {
-    const anthropicBody = convertOpenAiToAnthropicBody(convertedBody);
+    let anthropicBody = convertOpenAiToAnthropicBody(convertedBody);
+    const prefixLockResult = applyPrefixLock(anthropicBody, 'anthropic');
+    anthropicBody = prefixLockResult.body;
+
+    if (capture) {
+        capture.gateway.prefixLock = safeJsonClone(prefixLockResult.diagnostics);
+    }
+
     const upstreamUrl = buildApiUrl(upstreamBaseUrl, '/v1/messages');
     const upstreamHeaders = getAnthropicHeaders(request);
 
@@ -1310,20 +1564,27 @@ async function proxyChatCompletions(request) {
         return proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture);
     }
 
+    const prefixLockResult = applyPrefixLock(convertedBody, 'openai');
+    const upstreamBody = prefixLockResult.body;
+
+    if (capture) {
+        capture.gateway.prefixLock = safeJsonClone(prefixLockResult.diagnostics);
+    }
+
     const upstreamHeaders = getForwardHeaders(request);
 
     setCaptureUpstream(capture, {
         url,
         method: 'POST',
         headers: upstreamHeaders,
-        body: convertedBody,
+        body: upstreamBody,
         mode: 'openai',
     });
 
     const upstreamResponse = await fetch(url, {
         method: 'POST',
         headers: upstreamHeaders,
-        body: JSON.stringify(convertedBody),
+        body: JSON.stringify(upstreamBody),
     });
 
     if (convertedBody.stream) {
@@ -1370,6 +1631,20 @@ function jsonResponse(body, status = 200) {
     });
 }
 
+function anthropicInboundDisabledResponse(path) {
+    return jsonResponse({
+        error: 'Claude / Anthropic-compatible inbound is disabled in this gateway build.',
+        path,
+        reason: 'SillyTavern Claude-compatible inbound may cause repeated cache writes. Use OpenAI-compatible / Chat Completion in SillyTavern, then keep this gateway upstream format set to Anthropic native.',
+        recommendedSetup: {
+            sillyTavernBackend: 'OpenAI-compatible / Chat Completion',
+            baseUrl: `http://${host}:${port}`,
+            gatewayUpstreamMode: 'anthropic',
+            endpoint: '/v1/chat/completions',
+        },
+    }, 403);
+}
+
 function htmlResponse(html) {
     return new Response(html, {
         status: 200,
@@ -1403,6 +1678,9 @@ function getCaptureSummary(capture) {
         cacheWriteTokens: usage.anthropicCacheCreationInputTokens ?? usage.cacheWriteTokens ?? null,
         cacheResult: capture.response?.cacheResult ?? 'unknown',
         responseStatus: capture.response?.status ?? null,
+        prefixLockAction: capture.gateway?.prefixLock?.action ?? 'disabled',
+        prefixLockReason: capture.gateway?.prefixLock?.reason ?? null,
+        prefixLockHash: capture.gateway?.prefixLock?.lockedPrefixHash ?? capture.gateway?.prefixLock?.prefixHash ?? null,
     };
 }
 
@@ -1431,6 +1709,26 @@ async function handleConsoleApi(request, url) {
         const body = await readJsonRequest(request);
         captureRequests = Boolean(body?.enabled);
         log('Updated capture setting from console.', { captureRequests });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/prefix-lock') {
+        const body = await readJsonRequest(request);
+        prefixLockEnabled = Boolean(body?.enabled);
+
+        if (!prefixLockEnabled) {
+            updatePrefixLockStats('disabled');
+        } else {
+            updatePrefixLockStats(prefixLock ? 'enabled' : 'learning');
+        }
+
+        log('Updated prefix lock setting from console.', { prefixLockEnabled, prefixLockActive: Boolean(prefixLock) });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/prefix-lock/clear') {
+        clearPrefixLock();
+        log('Cleared prefix lock from console.', { prefixLockEnabled });
         return jsonResponse(getRuntimeState());
     }
 
@@ -1504,7 +1802,7 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 <main>
   <section class="header">
     <h1>ST Claude Cache Gateway 控制台</h1>
-    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、诊断转换后的请求 JSON。支持 OpenAI-compatible 和 Claude /v1/messages 入站。</p>
+    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、诊断最终上游请求。推荐酒馆使用 OpenAI-compatible 入站，网关使用 Anthropic native 上游。</p>
   </section>
 
   <section class="grid">
@@ -1555,13 +1853,29 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
     </div>
   </section>
 
+  <section class="card">
+    <h2>4. 强制 Prefix 锁定</h2>
+    <p class="help warn">开启后，第一次带 cache_control 的最终上游请求会被学习为锁定 prefix；后续请求会丢弃本轮缓存点前内容，改用锁定 prefix + 本轮 suffix。换角色、世界书、预设、聊天后请清空锁定。</p>
+    <div class="grid" style="margin-top: 12px;">
+      <div class="stat"><div class="label">锁定开关</div><div id="prefixLockEnabledText" class="value">加载中</div></div>
+      <div class="stat"><div class="label">锁定状态</div><div id="prefixLockStatusText" class="value">加载中</div></div>
+      <div class="stat"><div class="label">锁定 Prefix</div><div id="prefixLockHashText" class="value">加载中</div></div>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <button id="prefixLockOn" class="primary">开启强制锁定</button>
+      <button id="prefixLockOff">关闭强制锁定</button>
+      <button id="prefixLockClear" class="danger">清空锁定 / 下次重学</button>
+    </div>
+    <p id="prefixLockDetail" class="muted">加载中...</p>
+  </section>
+
   <section class="split">
     <div class="card">
-      <h2>4. 最近请求</h2>
+      <h2>5. 最近请求</h2>
       <div id="requests" class="muted">加载中...</div>
     </div>
     <div class="card">
-      <h2>5. 选中的 JSON</h2>
+      <h2>6. 选中的 JSON</h2>
       <div class="row" style="margin-bottom: 10px;">
         <button id="download" disabled>下载 JSON</button>
         <span id="selectedHint" class="muted">请选择左侧请求</span>
@@ -1617,7 +1931,11 @@ async function loadState() {
   document.getElementById('cacheTtlText').textContent = ttlLabel(state.cacheTtl);
   document.getElementById('upstreamModeText').textContent = upstreamModeLabel(state.upstreamMode);
   document.getElementById('captureText').textContent = (state.captureRequests ? '已开启' : '已关闭') + ' / ' + state.capturedRequests;
-  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl }, null, 2);
+  document.getElementById('prefixLockEnabledText').textContent = state.prefixLockEnabled ? '已开启' : '已关闭';
+  document.getElementById('prefixLockStatusText').textContent = state.prefixLockActive ? '已锁定' : (state.prefixLockEnabled ? '等待下次学习' : '未锁定');
+  document.getElementById('prefixLockHashText').textContent = state.prefixLockHash || '-';
+  document.getElementById('prefixLockDetail').textContent = '路径 ' + (state.prefixLockFirstCacheControlPath || '-') + ' · 替换 ' + state.prefixLockReplacements + ' · 最近动作 ' + (state.prefixLockLastAction || '-') + ' · 原因 ' + (state.prefixLockLastSkipReason || '-');
+  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl, anthropicInboundEnabled: state.anthropicInboundEnabled, prefixLock: { enabled: state.prefixLockEnabled, active: state.prefixLockActive, hash: state.prefixLockHash } }, null, 2);
   document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
   document.getElementById('upstreamMode').value = state.upstreamMode;
 }
@@ -1643,6 +1961,7 @@ async function loadRequests() {
       + ' · 状态 ' + (item.responseStatus || '-') + ' · ' + cacheResultLabel(item.cacheResult)
       + ' · 写入 ' + tokenLabel(item.cacheWriteTokens) + ' · 读取 ' + tokenLabel(item.cacheReadTokens)
       + ' · 缓存点 ' + item.cacheControlCount + ' · Prefix ' + (item.prefixHash || '-') + ' / ' + item.prefixLength
+      + ' · 锁定 ' + item.prefixLockAction + (item.prefixLockReason ? '(' + item.prefixLockReason + ')' : '')
       + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl)
       + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
     info.append(title, meta);
@@ -1677,6 +1996,9 @@ document.getElementById('captureOn').onclick = async () => { await api('/console
 document.getElementById('refreshCaptures').onclick = async () => { await refreshAll(); setStatus('诊断列表已刷新'); };
 document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求诊断已关闭'); };
 document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空诊断'); };
+document.getElementById('prefixLockOn').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('强制 Prefix 锁定已开启，下一次带缓存点请求会学习或替换'); };
+document.getElementById('prefixLockOff').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('强制 Prefix 锁定已关闭'); };
+document.getElementById('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('已清空锁定 prefix，开启状态下下一次请求会重新学习'); };
 document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
 document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
 refreshAll().catch((error) => { document.getElementById('cacheControl').textContent = error.message; });
@@ -1710,11 +2032,11 @@ async function handleRequest(request) {
         }
 
         if (request.method === 'POST' && url.pathname === '/v1/messages') {
-            return await proxyAnthropicMessages(request);
+            return anthropicInboundDisabledResponse(url.pathname);
         }
 
         if (request.method === 'POST' && url.pathname === '/v1/messages/count_tokens') {
-            return await proxyAnthropicCountTokens(request);
+            return anthropicInboundDisabledResponse(url.pathname);
         }
 
         if (request.method === 'GET' && url.pathname === '/v1/models') {
