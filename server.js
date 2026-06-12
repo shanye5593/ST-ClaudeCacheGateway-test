@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const MARKER = '[[CACHE_BREAK]]';
@@ -476,6 +477,9 @@ function extractUsage(responseJson) {
     const promptTokensDetails = usage.prompt_tokens_details || {};
 
     return {
+        inputTokens: usage.input_tokens ?? usage.prompt_tokens ?? null,
+        outputTokens: usage.output_tokens ?? usage.completion_tokens ?? null,
+        totalTokens: usage.total_tokens ?? null,
         cachedTokens: promptTokensDetails.cached_tokens ?? null,
         cacheReadTokens: usage.cache_read_tokens ?? responseJson?.cache_read_tokens ?? null,
         cacheWriteTokens: promptTokensDetails.cache_write_tokens ?? usage.cache_write_tokens ?? responseJson?.cache_write_tokens ?? null,
@@ -485,10 +489,130 @@ function extractUsage(responseJson) {
 }
 
 function safeJsonClone(value) {
+    if (value === undefined) {
+        return undefined;
+    }
+
     return JSON.parse(JSON.stringify(value));
 }
 
-function addRequestCapture({ originalBody, convertedBody, result, anthropicBody = null, inboundMode = 'openai' }) {
+function hashText(value) {
+    return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function getBodyHash(body) {
+    return hashText(JSON.stringify(body ?? null));
+}
+
+function summarizeHeaders(headers) {
+    const summary = {};
+
+    for (const [name, value] of headers.entries()) {
+        const normalized = name.toLowerCase();
+
+        if (normalized === 'authorization' || normalized === 'x-api-key' || normalized === 'cookie') {
+            summary[normalized] = value ? '[present]' : '[absent]';
+            continue;
+        }
+
+        summary[normalized] = value;
+    }
+
+    return summary;
+}
+
+function getContentSegments(content, basePath) {
+    if (typeof content === 'string') {
+        return [{ path: basePath, value: content, cacheControl: null }];
+    }
+
+    if (!Array.isArray(content)) {
+        return [];
+    }
+
+    return content.map((block, index) => ({
+        path: `${basePath}[${index}]`,
+        value: block,
+        cacheControl: block?.cache_control || null,
+    }));
+}
+
+function getCacheSegments(body, mode) {
+    const segments = [];
+
+    if (mode === 'anthropic') {
+        segments.push(...getContentSegments(body?.system, 'system'));
+
+        for (let messageIndex = 0; messageIndex < (body?.messages || []).length; messageIndex++) {
+            const message = body.messages[messageIndex];
+            const contentSegments = getContentSegments(message?.content, `messages[${messageIndex}].content`);
+
+            for (const segment of contentSegments) {
+                segments.push({
+                    ...segment,
+                    role: message?.role || null,
+                });
+            }
+        }
+
+        return segments;
+    }
+
+    for (let messageIndex = 0; messageIndex < (body?.messages || []).length; messageIndex++) {
+        const message = body.messages[messageIndex];
+        const contentSegments = getContentSegments(message?.content, `messages[${messageIndex}].content`);
+
+        for (const segment of contentSegments) {
+            segments.push({
+                ...segment,
+                role: message?.role || null,
+            });
+        }
+    }
+
+    return segments;
+}
+
+function getCacheDiagnostics(body, mode) {
+    const segments = getCacheSegments(body, mode);
+    const firstCacheIndex = segments.findIndex((segment) => segment.cacheControl);
+    const cacheControlCount = segments.reduce((total, segment) => total + (segment.cacheControl ? 1 : 0), 0);
+    const prefixSegments = firstCacheIndex >= 0 ? segments.slice(0, firstCacheIndex + 1) : [];
+    const suffixSegments = firstCacheIndex >= 0 ? segments.slice(firstCacheIndex + 1) : segments;
+    const prefixText = JSON.stringify(prefixSegments.map((segment) => segment.value));
+    const suffixText = JSON.stringify(suffixSegments.map((segment) => segment.value));
+
+    return {
+        bodyHash: getBodyHash(body),
+        markerRemaining: JSON.stringify(body).includes(MARKER),
+        cacheControlCount,
+        firstCacheControlPath: firstCacheIndex >= 0 ? `${segments[firstCacheIndex].path}.cache_control` : null,
+        firstCacheControl: firstCacheIndex >= 0 ? safeJsonClone(segments[firstCacheIndex].cacheControl) : null,
+        prefixHash: firstCacheIndex >= 0 ? hashText(prefixText) : null,
+        prefixLength: firstCacheIndex >= 0 ? prefixText.length : 0,
+        prefixBlockCount: prefixSegments.length,
+        suffixHash: hashText(suffixText),
+        suffixLength: suffixText.length,
+        suffixBlockCount: suffixSegments.length,
+    };
+}
+
+function getCacheResultFromUsage(usage) {
+    const read = usage?.anthropicCacheReadInputTokens ?? usage?.cachedTokens ?? usage?.cacheReadTokens ?? 0;
+    const write = usage?.anthropicCacheCreationInputTokens ?? usage?.cacheWriteTokens ?? 0;
+
+    if (read > 0) {
+        return 'hit';
+    }
+
+    if (write > 0) {
+        return 'creation';
+    }
+
+    return 'none';
+}
+
+function addRequestCapture({ request, originalBody, convertedBody, result, inboundMode = 'openai', inboundPath = '/v1/chat/completions' }) {
     if (!captureRequests) {
         return null;
     }
@@ -496,14 +620,24 @@ function addRequestCapture({ originalBody, convertedBody, result, anthropicBody 
     const capture = {
         id: `${Date.now()}-${requestCaptures.length + 1}`,
         capturedAt: new Date().toISOString(),
-        cacheTtl: getCacheTtlLabel(),
-        cacheControl: getCacheControl(),
-        conversion: safeJsonClone(result),
-        inboundMode,
-        upstreamMode,
-        originalBody: safeJsonClone(originalBody),
-        convertedBody: safeJsonClone(convertedBody),
-        anthropicBody: anthropicBody ? safeJsonClone(anthropicBody) : null,
+        inbound: {
+            mode: inboundMode,
+            path: inboundPath,
+            method: request.method,
+            headersSummary: summarizeHeaders(request.headers),
+            body: safeJsonClone(originalBody),
+            bodyHash: getBodyHash(originalBody),
+        },
+        gateway: {
+            upstreamMode,
+            cacheTtl: getCacheTtlLabel(),
+            cacheControl: getCacheControl(),
+            conversion: safeJsonClone(result),
+            transformedBody: safeJsonClone(convertedBody),
+            transformedBodyHash: getBodyHash(convertedBody),
+        },
+        upstream: null,
+        response: null,
     };
 
     requestCaptures.unshift(capture);
@@ -513,6 +647,40 @@ function addRequestCapture({ originalBody, convertedBody, result, anthropicBody 
     }
 
     return capture;
+}
+
+function setCaptureUpstream(capture, { url, method, headers, body, mode }) {
+    if (!capture) {
+        return;
+    }
+
+    capture.upstream = {
+        url,
+        method,
+        mode,
+        headersSummary: summarizeHeaders(headers),
+        body: safeJsonClone(body),
+        bodyHash: getBodyHash(body),
+        cache: getCacheDiagnostics(body, mode),
+    };
+}
+
+function setCaptureResponse(capture, upstreamResponse, text = null, json = null) {
+    if (!capture) {
+        return;
+    }
+
+    const usage = json ? extractUsage(json) : null;
+
+    capture.response = {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headersSummary: summarizeHeaders(upstreamResponse.headers),
+        bodyCaptured: text !== null,
+        bodyHash: text !== null ? hashText(text) : null,
+        usage,
+        cacheResult: usage ? getCacheResultFromUsage(usage) : 'unknown',
+    };
 }
 
 async function readJsonRequest(request) {
@@ -935,18 +1103,26 @@ function convertAnthropicStreamToOpenAi(stream, model) {
 
 async function proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture) {
     const anthropicBody = convertOpenAiToAnthropicBody(convertedBody);
+    const upstreamUrl = buildApiUrl(upstreamBaseUrl, '/v1/messages');
+    const upstreamHeaders = getAnthropicHeaders(request);
 
-    if (capture) {
-        capture.anthropicBody = safeJsonClone(anthropicBody);
-    }
-
-    const upstreamResponse = await fetch(buildApiUrl(upstreamBaseUrl, '/v1/messages'), {
+    setCaptureUpstream(capture, {
+        url: upstreamUrl,
         method: 'POST',
-        headers: getAnthropicHeaders(request),
+        headers: upstreamHeaders,
+        body: anthropicBody,
+        mode: 'anthropic',
+    });
+
+    const upstreamResponse = await fetch(upstreamUrl, {
+        method: 'POST',
+        headers: upstreamHeaders,
         body: JSON.stringify(anthropicBody),
     });
 
     if (anthropicBody.stream) {
+        setCaptureResponse(capture, upstreamResponse);
+
         const headers = addCorsHeaders(new Headers({
             'content-type': 'text/event-stream',
             'cache-control': 'no-cache',
@@ -965,6 +1141,8 @@ async function proxyChatCompletionsAnthropic(request, body, convertedBody, resul
     try {
         json = JSON.parse(text);
     } catch {}
+
+    setCaptureResponse(capture, upstreamResponse, text, json);
 
     if (!upstreamResponse.ok) {
         return new Response(text, {
@@ -1029,11 +1207,12 @@ async function proxyAnthropicMessages(request) {
     const convertedBody = safeJsonClone(body);
     const result = applyAnthropicCacheBreaks(convertedBody);
     const capture = addRequestCapture({
+        request,
         originalBody: body,
         convertedBody,
         result,
-        anthropicBody: convertedBody,
         inboundMode: 'anthropic',
+        inboundPath: '/v1/messages',
     });
 
     log('Forwarding Anthropic messages.', {
@@ -1048,9 +1227,20 @@ async function proxyAnthropicMessages(request) {
         captureId: capture?.id ?? null,
     });
 
-    const upstreamResponse = await fetch(buildApiUrl(upstreamBaseUrl, '/v1/messages'), {
+    const upstreamUrl = buildApiUrl(upstreamBaseUrl, '/v1/messages');
+    const upstreamHeaders = getAnthropicHeaders(request);
+
+    setCaptureUpstream(capture, {
+        url: upstreamUrl,
         method: 'POST',
-        headers: getAnthropicHeaders(request),
+        headers: upstreamHeaders,
+        body: convertedBody,
+        mode: 'anthropic',
+    });
+
+    const upstreamResponse = await fetch(upstreamUrl, {
+        method: 'POST',
+        headers: upstreamHeaders,
         body: JSON.stringify(convertedBody),
     });
 
@@ -1063,6 +1253,8 @@ async function proxyAnthropicMessages(request) {
     }
 
     if (convertedBody.stream) {
+        setCaptureResponse(capture, upstreamResponse);
+
         return new Response(upstreamResponse.body, {
             status: upstreamResponse.status,
             statusText: upstreamResponse.statusText,
@@ -1076,6 +1268,8 @@ async function proxyAnthropicMessages(request) {
     try {
         json = JSON.parse(text);
     } catch {}
+
+    setCaptureResponse(capture, upstreamResponse, text, json);
 
     if (json?.usage) {
         log('Anthropic upstream usage.', extractUsage(json));
@@ -1098,7 +1292,7 @@ async function proxyChatCompletions(request) {
 
     const convertedBody = JSON.parse(JSON.stringify(body));
     const result = applyCacheBreaks(convertedBody.messages);
-    const capture = addRequestCapture({ originalBody: body, convertedBody, result });
+    const capture = addRequestCapture({ request, originalBody: body, convertedBody, result });
 
     log('Forwarding chat completion.', {
         model: convertedBody.model,
@@ -1116,13 +1310,25 @@ async function proxyChatCompletions(request) {
         return proxyChatCompletionsAnthropic(request, body, convertedBody, result, capture);
     }
 
+    const upstreamHeaders = getForwardHeaders(request);
+
+    setCaptureUpstream(capture, {
+        url,
+        method: 'POST',
+        headers: upstreamHeaders,
+        body: convertedBody,
+        mode: 'openai',
+    });
+
     const upstreamResponse = await fetch(url, {
         method: 'POST',
-        headers: getForwardHeaders(request),
+        headers: upstreamHeaders,
         body: JSON.stringify(convertedBody),
     });
 
     if (convertedBody.stream) {
+        setCaptureResponse(capture, upstreamResponse);
+
         const headers = addCorsHeaders(new Headers({
             'content-type': upstreamResponse.headers.get('content-type') || 'text/event-stream',
             'cache-control': upstreamResponse.headers.get('cache-control') || 'no-cache',
@@ -1141,6 +1347,8 @@ async function proxyChatCompletions(request) {
     try {
         json = JSON.parse(text);
     } catch {}
+
+    setCaptureResponse(capture, upstreamResponse, text, json);
 
     if (json?.usage) {
         log('Upstream usage.', extractUsage(json));
@@ -1170,18 +1378,31 @@ function htmlResponse(html) {
 }
 
 function getCaptureSummary(capture) {
+    const upstreamBody = capture.upstream?.body;
+    const usage = capture.response?.usage || {};
+
     return {
         id: capture.id,
         capturedAt: capture.capturedAt,
-        model: capture.convertedBody?.model ?? null,
-        stream: Boolean(capture.convertedBody?.stream),
-        messages: Array.isArray(capture.convertedBody?.messages) ? capture.convertedBody.messages.length : 0,
-        cacheTtl: capture.cacheTtl,
-        inboundMode: capture.inboundMode,
-        upstreamMode: capture.upstreamMode,
-        injected: capture.conversion?.injected ?? 0,
-        removed: capture.conversion?.removed ?? 0,
-        overflowRemoved: capture.conversion?.overflowRemoved ?? 0,
+        model: upstreamBody?.model ?? capture.gateway?.transformedBody?.model ?? null,
+        stream: Boolean(upstreamBody?.stream ?? capture.gateway?.transformedBody?.stream),
+        messages: Array.isArray(upstreamBody?.messages) ? upstreamBody.messages.length : 0,
+        cacheTtl: capture.gateway?.cacheTtl ?? null,
+        inboundMode: capture.inbound?.mode ?? null,
+        upstreamMode: capture.gateway?.upstreamMode ?? null,
+        upstreamUrl: capture.upstream?.url ?? null,
+        injected: capture.gateway?.conversion?.injected ?? 0,
+        removed: capture.gateway?.conversion?.removed ?? 0,
+        overflowRemoved: capture.gateway?.conversion?.overflowRemoved ?? 0,
+        cacheControlCount: capture.upstream?.cache?.cacheControlCount ?? 0,
+        firstCacheControlPath: capture.upstream?.cache?.firstCacheControlPath ?? null,
+        prefixHash: capture.upstream?.cache?.prefixHash ?? null,
+        prefixLength: capture.upstream?.cache?.prefixLength ?? 0,
+        suffixHash: capture.upstream?.cache?.suffixHash ?? null,
+        cacheReadTokens: usage.anthropicCacheReadInputTokens ?? usage.cachedTokens ?? usage.cacheReadTokens ?? null,
+        cacheWriteTokens: usage.anthropicCacheCreationInputTokens ?? usage.cacheWriteTokens ?? null,
+        cacheResult: capture.response?.cacheResult ?? 'unknown',
+        responseStatus: capture.response?.status ?? null,
     };
 }
 
@@ -1283,13 +1504,13 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 <main>
   <section class="header">
     <h1>ST Claude Cache Gateway 控制台</h1>
-    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、捕获转换后的请求 JSON。支持 OpenAI-compatible 和 Claude /v1/messages 入站。</p>
+    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、诊断转换后的请求 JSON。支持 OpenAI-compatible 和 Claude /v1/messages 入站。</p>
   </section>
 
   <section class="grid">
     <div class="stat"><div class="label">缓存模式</div><div id="cacheTtlText" class="value">加载中</div></div>
     <div class="stat"><div class="label">上游格式</div><div id="upstreamModeText" class="value">加载中</div></div>
-    <div class="stat"><div class="label">请求捕获</div><div id="captureText" class="value">加载中</div></div>
+    <div class="stat"><div class="label">请求诊断</div><div id="captureText" class="value">加载中</div></div>
   </section>
 
   <section class="card">
@@ -1324,13 +1545,13 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
   </section>
 
   <section class="card">
-    <h2>3. 请求捕获</h2>
-    <p class="help warn">捕获的 JSON 可能包含完整 prompt / 聊天记录。默认关闭；只在排查问题时开启。</p>
+    <h2>3. 请求诊断</h2>
+    <p class="help warn">诊断 JSON 会原样记录网关实际发给上游的完整请求体，包括 system / messages / tools / thinking 等参数；只隐藏 Authorization、x-api-key、Cookie。默认关闭；只在排查问题时开启。</p>
     <div class="row" style="margin-top: 12px;">
-      <button id="captureOn" class="primary">开启捕获</button>
-      <button id="refreshCaptures">刷新捕获列表</button>
-      <button id="captureOff">关闭捕获</button>
-      <button id="clear" class="danger">清空捕获</button>
+      <button id="captureOn" class="primary">开启诊断</button>
+      <button id="refreshCaptures">刷新诊断列表</button>
+      <button id="captureOff">关闭诊断</button>
+      <button id="clear" class="danger">清空诊断</button>
     </div>
   </section>
 
@@ -1379,6 +1600,15 @@ function upstreamModeLabel(value) {
 function inboundModeLabel(value) {
   return value === 'anthropic' ? 'Claude 入站' : 'OpenAI 入站';
 }
+function cacheResultLabel(value) {
+  if (value === 'hit') return '命中';
+  if (value === 'creation') return '写入';
+  if (value === 'none') return '无读写';
+  return '未知';
+}
+function tokenLabel(value) {
+  return value === null || value === undefined ? '-' : value;
+}
 function setStatus(text) {
   document.getElementById('selectedHint').textContent = text;
 }
@@ -1395,7 +1625,7 @@ async function loadRequests() {
   const data = await api('/console/requests');
   const root = document.getElementById('requests');
   if (!data.requests.length) {
-    root.innerHTML = '<p class="muted">还没有捕获请求。先点“开启捕获”，再从酒馆发一条消息。</p>';
+    root.innerHTML = '<p class="muted">还没有诊断请求。先点“开启诊断”，再从酒馆发一条消息。</p>';
     return;
   }
   root.innerHTML = '';
@@ -1408,7 +1638,13 @@ async function loadRequests() {
     title.textContent = item.model || '未知模型';
     const meta = document.createElement('div');
     meta.className = 'request-meta';
-    meta.textContent = item.capturedAt + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
+    meta.textContent = item.capturedAt
+      + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode)
+      + ' · 状态 ' + (item.responseStatus || '-') + ' · ' + cacheResultLabel(item.cacheResult)
+      + ' · 写入 ' + tokenLabel(item.cacheWriteTokens) + ' · 读取 ' + tokenLabel(item.cacheReadTokens)
+      + ' · 缓存点 ' + item.cacheControlCount + ' · Prefix ' + (item.prefixHash || '-') + ' / ' + item.prefixLength
+      + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl)
+      + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
     info.append(title, meta);
     const button = document.createElement('button');
     button.textContent = '查看';
@@ -1437,10 +1673,10 @@ document.getElementById('saveUpstreamMode').onclick = async () => {
   await refreshAll();
   setStatus('上游格式已应用');
 };
-document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求捕获已开启，并已刷新列表'); };
-document.getElementById('refreshCaptures').onclick = async () => { await refreshAll(); setStatus('捕获列表已刷新'); };
-document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求捕获已关闭'); };
-document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空捕获'); };
+document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求诊断已开启，并已刷新列表'); };
+document.getElementById('refreshCaptures').onclick = async () => { await refreshAll(); setStatus('诊断列表已刷新'); };
+document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求诊断已关闭'); };
+document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空诊断'); };
 document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
 document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
 refreshAll().catch((error) => { document.getElementById('cacheControl').textContent = error.message; });

@@ -161,10 +161,12 @@ The console can:
 - switch upstream request format between Anthropic native and OpenAI-compatible without restarting the gateway;
 - remember the last selected TTL/upstream mode after restart in local `gateway-settings.json`;
 - show current runtime state;
-- enable capture and store the latest converted request JSON bodies in memory;
-- download a captured JSON file for debugging.
+- enable diagnostics and store the latest request records in memory;
+- record the exact final upstream request body that the gateway sends, including model/system/messages/tools/thinking and other parameters;
+- summarize cache-control path, prefix hash, suffix hash, response status, and cache read/write token usage when the upstream returns usage fields;
+- download a diagnostic JSON file for debugging.
 
-Captured requests can include private prompts. Capture is always off when the gateway starts.
+Diagnostic records can include private prompts. Diagnostics are always off when the gateway starts. API-key headers are redacted, but request bodies are intentionally kept intact for cache debugging.
 
 ## Health check
 
