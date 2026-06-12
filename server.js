@@ -198,19 +198,19 @@ function applyStandaloneMarkerToPreviousMessage(messages, markerIndex) {
     return null;
 }
 
+function countCacheBreakpointsInContent(content) {
+    if (!Array.isArray(content)) {
+        return 0;
+    }
+
+    return content.reduce((total, block) => total + (block?.cache_control ? 1 : 0), 0);
+}
+
 function countExistingCacheBreakpoints(messages) {
     let count = 0;
 
     for (const message of messages) {
-        if (!Array.isArray(message?.content)) {
-            continue;
-        }
-
-        for (const block of message.content) {
-            if (block?.cache_control) {
-                count++;
-            }
-        }
+        count += countCacheBreakpointsInContent(message?.content);
     }
 
     return count;
@@ -278,6 +278,23 @@ function transformContentArray(content, remainingBreakpoints) {
             continue;
         }
 
+        if (isMarkerOnlyText(block.text)) {
+            const previousBlock = nextContent[nextContent.length - 1];
+            const canInject = injected < remainingBreakpoints
+                && isTextBlock(previousBlock)
+                && previousBlock.text.trim()
+                && !previousBlock.cache_control;
+
+            if (canInject) {
+                previousBlock.cache_control = getCacheControl();
+                injected++;
+            }
+
+            changed = true;
+            removed += countMarkers(block.text);
+            continue;
+        }
+
         const result = transformText(block.text, remainingBreakpoints - injected);
         changed = changed || result.changed;
         injected += result.injected;
@@ -295,33 +312,44 @@ function transformContentArray(content, remainingBreakpoints) {
     return { changed, content: nextContent, injected, removed };
 }
 
+function removeOverflowMarkersFromContent(content) {
+    let removed = 0;
+
+    if (typeof content === 'string' && content.includes(MARKER)) {
+        const before = content;
+        return {
+            content: stripMarkers(content),
+            removed: countMarkers(before),
+        };
+    }
+
+    if (Array.isArray(content)) {
+        for (const block of content) {
+            if (isTextBlock(block) && block.text.includes(MARKER)) {
+                const before = block.text;
+                block.text = stripMarkers(block.text);
+                removed += countMarkers(before);
+            }
+        }
+    }
+
+    return { content, removed };
+}
+
 function removeOverflowMarkers(messages) {
     let removed = 0;
 
     for (const message of messages) {
-        if (typeof message?.content === 'string' && message.content.includes(MARKER)) {
-            const before = message.content;
-            message.content = stripMarkers(message.content);
-            removed += countMarkers(before);
-            continue;
-        }
-
-        if (Array.isArray(message?.content)) {
-            for (const block of message.content) {
-                if (isTextBlock(block) && block.text.includes(MARKER)) {
-                    const before = block.text;
-                    block.text = stripMarkers(block.text);
-                    removed += countMarkers(before);
-                }
-            }
-        }
+        const result = removeOverflowMarkersFromContent(message?.content);
+        message.content = result.content;
+        removed += result.removed;
     }
 
     return removed;
 }
 
-function applyCacheBreaks(messages) {
-    const existingBreakpoints = countExistingCacheBreakpoints(messages);
+function applyCacheBreaks(messages, initialExistingBreakpoints = 0) {
+    const existingBreakpoints = initialExistingBreakpoints + countExistingCacheBreakpoints(messages);
     let remainingBreakpoints = Math.max(0, MAX_BREAKPOINTS - existingBreakpoints);
     let injected = 0;
     let removed = 0;
@@ -426,7 +454,7 @@ function safeJsonClone(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-function addRequestCapture({ originalBody, convertedBody, result, anthropicBody = null }) {
+function addRequestCapture({ originalBody, convertedBody, result, anthropicBody = null, inboundMode = 'openai' }) {
     if (!captureRequests) {
         return null;
     }
@@ -437,6 +465,7 @@ function addRequestCapture({ originalBody, convertedBody, result, anthropicBody 
         cacheTtl: getCacheTtlLabel(),
         cacheControl: getCacheControl(),
         conversion: safeJsonClone(result),
+        inboundMode,
         upstreamMode,
         originalBody: safeJsonClone(originalBody),
         convertedBody: safeJsonClone(convertedBody),
@@ -478,23 +507,39 @@ function getForwardHeaders(request) {
 function addCorsHeaders(headers = new Headers()) {
     headers.set('access-control-allow-origin', '*');
     headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
-    headers.set('access-control-allow-headers', 'authorization,content-type');
+    headers.set('access-control-allow-headers', 'authorization,content-type,x-api-key,anthropic-version,anthropic-beta');
     return headers;
 }
 
-function getAnthropicHeaders(request) {
-    const headers = getForwardHeaders(request);
-
-    if (!headers.has('x-api-key')) {
-        const authorization = headers.get('authorization');
-
-        if (authorization?.startsWith('Bearer ')) {
-            headers.set('x-api-key', authorization.slice('Bearer '.length));
-        }
+function normalizeApiKey(value) {
+    if (!value) {
+        return null;
     }
 
-    headers.set('anthropic-version', process.env.ANTHROPIC_VERSION || '2023-06-01');
-    headers.delete('authorization');
+    return value.startsWith('Bearer ') ? value.slice('Bearer '.length) : value;
+}
+
+function getAnthropicHeaders(request) {
+    const headers = new Headers();
+    const apiKey = normalizeApiKey(
+        request.headers.get('x-api-key')
+        || request.headers.get('authorization')
+        || process.env.UPSTREAM_API_KEY,
+    );
+
+    if (apiKey) {
+        headers.set('x-api-key', apiKey);
+    }
+
+    headers.set('content-type', 'application/json');
+    headers.set('anthropic-version', request.headers.get('anthropic-version') || process.env.ANTHROPIC_VERSION || '2023-06-01');
+
+    const anthropicBeta = request.headers.get('anthropic-beta') || process.env.ANTHROPIC_BETA;
+
+    if (anthropicBeta) {
+        headers.set('anthropic-beta', anthropicBeta);
+    }
+
     return headers;
 }
 
@@ -502,7 +547,7 @@ async function proxyJsonRequest(request, path) {
     const url = buildApiUrl(upstreamBaseUrl, path);
     const upstreamResponse = await fetch(url, {
         method: request.method,
-        headers: getForwardHeaders(request),
+        headers: upstreamMode === 'anthropic' ? getAnthropicHeaders(request) : getForwardHeaders(request),
     });
     const text = await upstreamResponse.text();
     const headers = addCorsHeaders(new Headers({
@@ -514,6 +559,131 @@ async function proxyJsonRequest(request, path) {
         statusText: upstreamResponse.statusText,
         headers,
     });
+}
+
+function addCacheControlToLastSystemTextBlock(system) {
+    if (typeof system === 'string') {
+        if (!system.trim()) {
+            return null;
+        }
+
+        return {
+            system: [{ type: 'text', text: system, cache_control: getCacheControl() }],
+            blockIndex: 0,
+            cachedBlockTextLength: system.length,
+        };
+    }
+
+    if (!Array.isArray(system)) {
+        return null;
+    }
+
+    for (let blockIndex = system.length - 1; blockIndex >= 0; blockIndex--) {
+        const block = system[blockIndex];
+
+        if (isTextBlock(block) && block.text.trim()) {
+            block.cache_control = getCacheControl();
+            return {
+                system,
+                blockIndex,
+                cachedBlockTextLength: block.text.length,
+            };
+        }
+    }
+
+    return null;
+}
+
+function transformAnthropicSystem(system, remainingBreakpoints) {
+    if (system === undefined || system === null) {
+        return {
+            system,
+            injected: 0,
+            removed: 0,
+            changed: false,
+            modified: null,
+            existingBreakpoints: 0,
+        };
+    }
+
+    const existingBreakpoints = countCacheBreakpointsInContent(Array.isArray(system) ? system : []);
+    let availableBreakpoints = Math.max(0, remainingBreakpoints - existingBreakpoints);
+
+    if (remainingBreakpoints <= 0 || availableBreakpoints <= 0) {
+        const overflow = removeOverflowMarkersFromContent(system);
+        return {
+            system: overflow.content,
+            injected: 0,
+            removed: overflow.removed,
+            changed: overflow.removed > 0,
+            modified: overflow.removed > 0 ? { source: 'system-overflow' } : null,
+            existingBreakpoints,
+        };
+    }
+
+    if (typeof system === 'string') {
+        const result = transformText(system, availableBreakpoints);
+
+        return {
+            system: result.content,
+            injected: result.injected,
+            removed: result.removed,
+            changed: result.changed,
+            modified: result.changed ? { source: 'system-string' } : null,
+            existingBreakpoints,
+        };
+    }
+
+    if (!Array.isArray(system)) {
+        return { system, injected: 0, removed: 0, changed: false, modified: null, existingBreakpoints };
+    }
+
+    for (let index = 0; index < system.length; index++) {
+        const block = system[index];
+
+        if (availableBreakpoints > 0 && isTextBlock(block) && isMarkerOnlyText(block.text)) {
+            const result = addCacheControlToLastSystemTextBlock(system.slice(0, index));
+            const markerCount = countMarkers(block.text);
+
+            system.splice(index, 1);
+
+            if (result) {
+                availableBreakpoints--;
+                return {
+                    system,
+                    injected: 1,
+                    removed: markerCount,
+                    changed: true,
+                    modified: {
+                        source: 'system-standalone-marker',
+                        appliedToBlock: result.blockIndex,
+                        cachedBlockTextLength: result.cachedBlockTextLength,
+                    },
+                    existingBreakpoints,
+                };
+            }
+
+            return {
+                system,
+                injected: 0,
+                removed: markerCount,
+                changed: true,
+                modified: { source: 'system-standalone-marker', appliedToBlock: null },
+                existingBreakpoints,
+            };
+        }
+    }
+
+    const result = transformContentArray(system, availableBreakpoints);
+
+    return {
+        system: result.content,
+        injected: result.injected,
+        removed: result.removed,
+        changed: result.changed,
+        modified: result.changed ? { source: 'system-content-array' } : null,
+        existingBreakpoints,
+    };
 }
 
 function normalizeAnthropicContent(content) {
@@ -532,6 +702,43 @@ function normalizeAnthropicContent(content) {
 
         return { ...block };
     });
+}
+
+function applyAnthropicCacheBreaks(body) {
+    const result = {
+        existingBreakpoints: 0,
+        injected: 0,
+        removed: 0,
+        changedMessages: 0,
+        modifiedMessages: [],
+        overflowRemoved: 0,
+    };
+    let remainingBreakpoints = MAX_BREAKPOINTS;
+
+    const systemResult = transformAnthropicSystem(body.system, remainingBreakpoints);
+    result.existingBreakpoints += systemResult.existingBreakpoints;
+    result.injected += systemResult.injected;
+    result.removed += systemResult.removed;
+    remainingBreakpoints = Math.max(0, remainingBreakpoints - systemResult.existingBreakpoints - systemResult.injected);
+
+    if (systemResult.changed) {
+        body.system = systemResult.system;
+        result.changedMessages++;
+        result.modifiedMessages.push({ index: 'system', role: 'system', ...systemResult.modified });
+    }
+
+    if (Array.isArray(body.messages)) {
+        const reservedBreakpoints = result.existingBreakpoints + result.injected;
+        const messagesResult = applyCacheBreaks(body.messages, reservedBreakpoints);
+        result.existingBreakpoints += messagesResult.existingBreakpoints - reservedBreakpoints;
+        result.injected += messagesResult.injected;
+        result.removed += messagesResult.removed;
+        result.changedMessages += messagesResult.changedMessages;
+        result.modifiedMessages.push(...messagesResult.modifiedMessages);
+        result.overflowRemoved += messagesResult.overflowRemoved;
+    }
+
+    return result;
 }
 
 function convertOpenAiToAnthropicBody(body) {
@@ -738,6 +945,115 @@ async function proxyChatCompletionsAnthropic(request, body, convertedBody, resul
     return jsonResponse(convertAnthropicResponseToOpenAi(json, anthropicBody.model));
 }
 
+async function proxyAnthropicCountTokens(request) {
+    if (upstreamMode !== 'anthropic') {
+        return jsonResponse({
+            error: 'Anthropic count_tokens requires Anthropic upstream mode.',
+            hint: 'Switch the debug console upstream format to Anthropic native, or start with UPSTREAM_MODE=anthropic.',
+        }, 400);
+    }
+
+    const body = await readJsonRequest(request);
+
+    if (!body || !Array.isArray(body.messages)) {
+        return jsonResponse({ error: 'Request body must include messages array.' }, 400);
+    }
+
+    const convertedBody = safeJsonClone(body);
+    applyAnthropicCacheBreaks(convertedBody);
+
+    const upstreamResponse = await fetch(buildApiUrl(upstreamBaseUrl, '/v1/messages/count_tokens'), {
+        method: 'POST',
+        headers: getAnthropicHeaders(request),
+        body: JSON.stringify(convertedBody),
+    });
+    const text = await upstreamResponse.text();
+
+    return new Response(text, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: addCorsHeaders(new Headers({
+            'content-type': upstreamResponse.headers.get('content-type') || 'application/json',
+        })),
+    });
+}
+
+async function proxyAnthropicMessages(request) {
+    if (upstreamMode !== 'anthropic') {
+        return jsonResponse({
+            error: 'Anthropic inbound /v1/messages requires Anthropic upstream mode.',
+            hint: 'Switch the debug console upstream format to Anthropic native, or start with UPSTREAM_MODE=anthropic.',
+        }, 400);
+    }
+
+    const body = await readJsonRequest(request);
+
+    if (!body || !Array.isArray(body.messages)) {
+        return jsonResponse({ error: 'Request body must include messages array.' }, 400);
+    }
+
+    const convertedBody = safeJsonClone(body);
+    const result = applyAnthropicCacheBreaks(convertedBody);
+    const capture = addRequestCapture({
+        originalBody: body,
+        convertedBody,
+        result,
+        anthropicBody: convertedBody,
+        inboundMode: 'anthropic',
+    });
+
+    log('Forwarding Anthropic messages.', {
+        model: convertedBody.model,
+        stream: Boolean(convertedBody.stream),
+        messages: convertedBody.messages.length,
+        injected: result.injected,
+        removed: result.removed,
+        overflowRemoved: result.overflowRemoved,
+        cacheTtl: getCacheTtlLabel(),
+        upstreamMode,
+        captureId: capture?.id ?? null,
+    });
+
+    const upstreamResponse = await fetch(buildApiUrl(upstreamBaseUrl, '/v1/messages'), {
+        method: 'POST',
+        headers: getAnthropicHeaders(request),
+        body: JSON.stringify(convertedBody),
+    });
+
+    const headers = addCorsHeaders(new Headers({
+        'content-type': upstreamResponse.headers.get('content-type') || (convertedBody.stream ? 'text/event-stream' : 'application/json'),
+    }));
+
+    if (upstreamResponse.headers.get('cache-control') || convertedBody.stream) {
+        headers.set('cache-control', upstreamResponse.headers.get('cache-control') || 'no-cache');
+    }
+
+    if (convertedBody.stream) {
+        return new Response(upstreamResponse.body, {
+            status: upstreamResponse.status,
+            statusText: upstreamResponse.statusText,
+            headers,
+        });
+    }
+
+    const text = await upstreamResponse.text();
+    let json = null;
+
+    try {
+        json = JSON.parse(text);
+    } catch {}
+
+    if (json?.usage) {
+        log('Anthropic upstream usage.', extractUsage(json));
+    }
+
+    return new Response(text, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers,
+    });
+}
+
 async function proxyChatCompletions(request) {
     const url = buildApiUrl(upstreamBaseUrl, '/v1/chat/completions');
     const body = await readJsonRequest(request);
@@ -827,6 +1143,7 @@ function getCaptureSummary(capture) {
         stream: Boolean(capture.convertedBody?.stream),
         messages: Array.isArray(capture.convertedBody?.messages) ? capture.convertedBody.messages.length : 0,
         cacheTtl: capture.cacheTtl,
+        inboundMode: capture.inboundMode,
         upstreamMode: capture.upstreamMode,
         injected: capture.conversion?.injected ?? 0,
         removed: capture.conversion?.removed ?? 0,
@@ -930,7 +1247,7 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 <main>
   <section class="header">
     <h1>ST Claude Cache Gateway 控制台</h1>
-    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、捕获转换后的请求 JSON。</p>
+    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、捕获转换后的请求 JSON。支持 OpenAI-compatible 和 Claude /v1/messages 入站。</p>
   </section>
 
   <section class="grid">
@@ -1022,6 +1339,9 @@ function ttlLabel(value) {
 function upstreamModeLabel(value) {
   return value === 'anthropic' ? 'Anthropic native（默认推荐）' : 'OpenAI-compatible（兼容模式）';
 }
+function inboundModeLabel(value) {
+  return value === 'anthropic' ? 'Claude 入站' : 'OpenAI 入站';
+}
 function setStatus(text) {
   document.getElementById('selectedHint').textContent = text;
 }
@@ -1051,7 +1371,7 @@ async function loadRequests() {
     title.textContent = item.model || '未知模型';
     const meta = document.createElement('div');
     meta.className = 'request-meta';
-    meta.textContent = item.capturedAt + ' · ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
+    meta.textContent = item.capturedAt + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
     info.append(title, meta);
     const button = document.createElement('button');
     button.textContent = '查看';
@@ -1113,6 +1433,14 @@ async function handleRequest(request) {
 
         if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
             return await proxyChatCompletions(request);
+        }
+
+        if (request.method === 'POST' && url.pathname === '/v1/messages') {
+            return await proxyAnthropicMessages(request);
+        }
+
+        if (request.method === 'POST' && url.pathname === '/v1/messages/count_tokens') {
+            return await proxyAnthropicCountTokens(request);
         }
 
         if (request.method === 'GET' && url.pathname === '/v1/models') {

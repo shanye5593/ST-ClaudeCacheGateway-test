@@ -7,6 +7,7 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 ## Features
 
 - `POST /v1/chat/completions` accepts SillyTavern/OpenAI-compatible chat completions after converting markers.
+- `POST /v1/messages` accepts Claude/Anthropic-compatible requests after converting markers.
 - Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility.
 - Can switch back to OpenAI-compatible upstream mode with `UPSTREAM_MODE=openai` or the debug console.
 - `GET /v1/models` forwards model listing.
@@ -58,12 +59,20 @@ and forwards to:
 https://api.pioneer.ai
 ```
 
-In SillyTavern Chat Completion settings:
+In SillyTavern OpenAI-compatible / Chat Completion settings:
 
 ```text
 Base URL: http://127.0.0.1:8788
 API Key:  your Pioneer API key
 Model:    your Pioneer model name
+```
+
+In SillyTavern Claude/Anthropic-compatible settings, use the same local base URL:
+
+```text
+Base URL: http://127.0.0.1:8788
+API Key:  your Pioneer API key
+Model:    your Claude model name
 ```
 
 ## Termux quick start
@@ -120,6 +129,8 @@ Use OpenAI-compatible upstream mode if your provider/model does not support Clau
 ```sh
 UPSTREAM_MODE=openai npm start
 ```
+
+Note: Claude/Anthropic-compatible inbound `POST /v1/messages` requires Anthropic upstream mode. OpenAI-compatible inbound `POST /v1/chat/completions` can use either upstream mode.
 
 Try 1-hour TTL if your upstream supports it:
 
