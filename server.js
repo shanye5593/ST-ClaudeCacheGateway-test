@@ -1,15 +1,46 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
 const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
+const SETTINGS_FILE = new URL('./gateway-settings.json', import.meta.url);
+const runtimeSettings = loadRuntimeSettings();
 
 const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
-let cacheTtl = normalizeCacheTtl(process.env.CACHE_TTL || '');
-let upstreamMode = normalizeUpstreamMode(process.env.UPSTREAM_MODE || 'anthropic');
-let captureRequests = process.env.CAPTURE_REQUESTS === '1';
+let cacheTtl = normalizeCacheTtl(getRuntimeConfigValue('CACHE_TTL', runtimeSettings.cacheTtl, '1h'));
+let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode, 'anthropic'));
+let captureRequests = false;
 const requestCaptures = [];
 const MAX_REQUEST_CAPTURES = 20;
+
+function loadRuntimeSettings() {
+    try {
+        return JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+function saveRuntimeSettings() {
+    writeFileSync(SETTINGS_FILE, `${JSON.stringify({
+        cacheTtl: getCacheTtlLabel(),
+        upstreamMode,
+    }, null, 2)}\n`);
+}
+
+function getRuntimeConfigValue(name, savedValue, defaultValue) {
+    if (Object.prototype.hasOwnProperty.call(process.env, name)) {
+        return process.env[name];
+    }
+
+    if (savedValue !== undefined && savedValue !== null) {
+        return savedValue;
+    }
+
+    return defaultValue;
+}
 
 function normalizeBaseUrl(baseUrl) {
     return baseUrl.trim().replace(/\/+$/, '');
@@ -29,7 +60,10 @@ function buildApiUrl(baseUrl, path) {
 function normalizeCacheTtl(ttl) {
     const normalized = String(ttl || '').trim();
 
-    if (!normalized || normalized.toLowerCase() === 'default' || normalized.toLowerCase() === 'none') {
+    if (!normalized
+        || normalized.toLowerCase() === 'default'
+        || normalized.toLowerCase() === 'provider-default'
+        || normalized.toLowerCase() === 'none') {
         return '';
     }
 
@@ -1159,6 +1193,7 @@ async function handleConsoleApi(request, url) {
     if (request.method === 'POST' && url.pathname === '/console/cache-ttl') {
         const body = await readJsonRequest(request);
         cacheTtl = normalizeCacheTtl(body?.ttl || '');
+        saveRuntimeSettings();
         log('Updated cache TTL from console.', { cacheTtl: getCacheTtlLabel(), cacheControl: getCacheControl() });
         return jsonResponse(getRuntimeState());
     }
@@ -1166,6 +1201,7 @@ async function handleConsoleApi(request, url) {
     if (request.method === 'POST' && url.pathname === '/console/upstream-mode') {
         const body = await readJsonRequest(request);
         upstreamMode = normalizeUpstreamMode(body?.mode || 'anthropic');
+        saveRuntimeSettings();
         log('Updated upstream mode from console.', { upstreamMode });
         return jsonResponse(getRuntimeState());
     }
@@ -1258,18 +1294,18 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 
   <section class="card">
     <h2>1. 缓存 TTL 模式</h2>
-    <p class="help">推荐默认模式：不发送 ttl，让供应商使用默认 ephemeral 窗口。Pioneer 当前实测约 5 分钟，并且命中会续期。</p>
+    <p class="help">推荐默认模式：发送 ttl: 1h，使用 Claude 原生 1 小时缓存。也可以切回 provider-default，不发送 ttl，让供应商使用默认 ephemeral 窗口。</p>
     <div class="row" style="margin-top: 12px;">
       <label>当前模式
         <select id="ttl">
-          <option value="">默认 / provider-default（推荐）</option>
-          <option value="1h">1h 实验模式</option>
+          <option value="1h">1h（默认推荐）</option>
+          <option value="">provider-default / 不发送 ttl</option>
         </select>
       </label>
       <button id="saveTtl" class="primary">应用 TTL</button>
       <button id="refresh">刷新状态</button>
     </div>
-    <p class="help warn">1h 只代表网关会发送 ttl: 1h；是否真的按 1 小时生效取决于上游供应商。</p>
+    <p class="help warn">网关会记住控制台上一次选择的 TTL 和上游格式，重启后继续沿用。环境变量会优先生效。</p>
   </section>
 
   <section class="card">
@@ -1289,9 +1325,10 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
 
   <section class="card">
     <h2>3. 请求捕获</h2>
-    <p class="help warn">捕获的 JSON 可能包含完整 prompt / 聊天记录。默认关闭；只在排查问题时开启，分享前必须打码。</p>
+    <p class="help warn">捕获的 JSON 可能包含完整 prompt / 聊天记录。默认关闭；只在排查问题时开启。</p>
     <div class="row" style="margin-top: 12px;">
       <button id="captureOn" class="primary">开启捕获</button>
+      <button id="refreshCaptures">刷新捕获列表</button>
       <button id="captureOff">关闭捕获</button>
       <button id="clear" class="danger">清空捕获</button>
     </div>
@@ -1334,7 +1371,7 @@ function downloadJson(data, filename) {
   URL.revokeObjectURL(url);
 }
 function ttlLabel(value) {
-  return value === '1h' ? '1h 实验模式' : '默认 / provider-default';
+  return value === '1h' ? '1h（默认推荐）' : 'provider-default / 不发送 ttl';
 }
 function upstreamModeLabel(value) {
   return value === 'anthropic' ? 'Anthropic native（默认推荐）' : 'OpenAI-compatible（兼容模式）';
@@ -1371,7 +1408,7 @@ async function loadRequests() {
     title.textContent = item.model || '未知模型';
     const meta = document.createElement('div');
     meta.className = 'request-meta';
-    meta.textContent = item.capturedAt + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 移除 ' + item.removed;
+    meta.textContent = item.capturedAt + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode) + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl) + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
     info.append(title, meta);
     const button = document.createElement('button');
     button.textContent = '查看';
@@ -1400,7 +1437,8 @@ document.getElementById('saveUpstreamMode').onclick = async () => {
   await refreshAll();
   setStatus('上游格式已应用');
 };
-document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求捕获已开启'); };
+document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求捕获已开启，并已刷新列表'); };
+document.getElementById('refreshCaptures').onclick = async () => { await refreshAll(); setStatus('捕获列表已刷新'); };
 document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求捕获已关闭'); };
 document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空捕获'); };
 document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };

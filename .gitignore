@@ -4,3 +4,4 @@ node_modules/
 *.local
 claude-cache-*.json
 claude-cache-*.txt
+gateway-settings.json

@@ -13,7 +13,7 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
 - Supports streaming by piping the upstream response body.
-- Defaults to provider ephemeral cache lifetime, usually about 5 minutes.
+- Defaults to Claude native 1-hour cache TTL.
 - Works on PC and Android Termux with Node.js 18+.
 - No dependencies.
 
@@ -30,14 +30,15 @@ The gateway removes the marker and adds this by default:
 ```json
 {
   "cache_control": {
-    "type": "ephemeral"
+    "type": "ephemeral",
+    "ttl": "1h"
   }
 }
 ```
 
 Claude supports up to 4 cache breakpoints per request. Extra markers are removed without cache control.
 
-The default provider ephemeral window is usually about 5 minutes. If your upstream supports 1-hour cache TTL, you can opt in with `CACHE_TTL=1h` or the debug console. Pioneer currently documents `ttl: "1h"`, but OpenAI-compatible chat completions may still behave as provider-default depending on the upstream.
+The default cache TTL is now `1h` because the gateway defaults to Anthropic native `/v1/messages` upstream mode. If you need the provider default ephemeral window instead, use `CACHE_TTL=default` or switch it in the debug console.
 
 ## PC quick start
 
@@ -116,7 +117,7 @@ Environment variables:
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream provider root, `/v1`, or full endpoint. |
 | `UPSTREAM_MODE` | `anthropic` | Upstream request format. `anthropic` converts chat completions to Claude native `/v1/messages`; `openai` forwards to `/v1/chat/completions`. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
-| `CACHE_TTL` | empty | Cache lifetime. Empty/default/none omits `ttl`; use `1h` to try Anthropic's 1-hour TTL. |
+| `CACHE_TTL` | `1h` | Cache lifetime. `1h` sends Anthropic's 1-hour TTL; empty/default/none/provider-default omits `ttl`. |
 
 Examples:
 
@@ -132,17 +133,17 @@ UPSTREAM_MODE=openai npm start
 
 Note: Claude/Anthropic-compatible inbound `POST /v1/messages` requires Anthropic upstream mode. OpenAI-compatible inbound `POST /v1/chat/completions` can use either upstream mode.
 
-Try 1-hour TTL if your upstream supports it:
+Use provider-default cache TTL if your upstream/model does not support `1h`:
 
 ```sh
-CACHE_TTL=1h npm start
+CACHE_TTL=default npm start
 ```
 
 ```powershell
 $env:UPSTREAM_BASE_URL = 'https://api.pioneer.ai'
 $env:PORT = '8788'
-# Optional experimental 1-hour TTL:
-# $env:CACHE_TTL = '1h'
+# Optional: omit ttl and use provider default cache lifetime
+# $env:CACHE_TTL = 'default'
 npm start
 ```
 
@@ -156,13 +157,14 @@ http://127.0.0.1:8788/console
 
 The console can:
 
-- switch cache TTL between provider default and `1h` without restarting the gateway;
+- switch cache TTL between `1h` and provider default without restarting the gateway;
 - switch upstream request format between Anthropic native and OpenAI-compatible without restarting the gateway;
+- remember the last selected TTL/upstream mode after restart in local `gateway-settings.json`;
 - show current runtime state;
 - enable capture and store the latest converted request JSON bodies in memory;
 - download a captured JSON file for debugging.
 
-Captured requests can include private prompts. Review them before sharing.
+Captured requests can include private prompts. Capture is always off when the gateway starts.
 
 ## Health check
 
@@ -179,7 +181,7 @@ Expected response:
   "port": 8788,
   "upstreamBaseUrl": "https://api.pioneer.ai",
   "upstreamMode": "anthropic",
-  "cacheTtl": "provider-default"
+  "cacheTtl": "1h"
 }
 ```
 
