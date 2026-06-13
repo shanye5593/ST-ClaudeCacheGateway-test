@@ -10,6 +10,7 @@ This route keeps SillyTavern's normal send flow intact, so memory/world-info/reg
 - Claude/Anthropic-compatible inbound (`POST /v1/messages`) is intentionally disabled because SillyTavern Claude-compatible requests may repeatedly rewrite cache.
 - Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility after receiving OpenAI-compatible inbound requests.
 - Can switch back to OpenAI-compatible upstream mode with `UPSTREAM_MODE=openai` or the debug console.
+- Supports optional upstream extra JSON body parameters for OpenRouter/provider routing tests.
 - `GET /v1/models` forwards model listing.
 - `GET /health` checks the gateway.
 - Supports streaming by piping the upstream response body.
@@ -110,6 +111,7 @@ Environment variables:
 | `PORT` | `8789` | Listen port. |
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream provider root, `/v1`, or full endpoint. |
 | `UPSTREAM_MODE` | `anthropic` | Upstream request format. `anthropic` converts chat completions to Claude native `/v1/messages`; `openai` forwards to `/v1/chat/completions`. |
+| `UPSTREAM_EXTRA_JSON` | `{}` | Optional JSON object merged into OpenAI-compatible upstream request bodies, useful for OpenRouter provider routing parameters. |
 | `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
 | `CACHE_TTL` | `1h` | Cache lifetime. `1h` sends Anthropic's 1-hour TTL; empty/default/none/provider-default omits `ttl`. |
 
@@ -124,6 +126,26 @@ Use OpenAI-compatible upstream mode if your provider/model does not support Clau
 ```sh
 UPSTREAM_MODE=openai npm start
 ```
+
+OpenRouter AWS supplier test example:
+
+```powershell
+$env:UPSTREAM_BASE_URL = 'https://openrouter.ai/api/v1'
+$env:UPSTREAM_MODE = 'openai'
+$env:UPSTREAM_API_KEY = 'sk-or-v1-...'
+npm start
+```
+
+Then open the console, apply the `OpenRouter AWS 锁定` preset, enable diagnostics, and confirm the selected diagnostic JSON contains:
+
+```json
+"provider": {
+  "order": ["Amazon Bedrock"],
+  "allow_fallbacks": false
+}
+```
+
+The returned-provider display is best-effort. Some upstreams return provider information in headers/body; if OpenRouter does not return it, the gateway will show `unknown/not returned`, but the final upstream request body still proves whether the provider lock was sent.
 
 Note: Claude/Anthropic-compatible inbound `POST /v1/messages` and `POST /v1/messages/count_tokens` are disabled. Use OpenAI-compatible inbound `POST /v1/chat/completions`; it can use either upstream mode, with Anthropic native recommended for Claude cache.
 
@@ -159,6 +181,7 @@ The console can:
 - record the exact final upstream request body that the gateway sends, including model/system/messages/tools/thinking and other parameters;
 - summarize cache-control path, prefix hash, suffix hash, response status, and cache read/write token usage when the upstream returns usage fields;
 - enable memory-only Force Prefix Lock;
+- apply OpenRouter/provider extra JSON parameters and show best-effort returned provider information when the upstream exposes it;
 - download a diagnostic JSON file for debugging.
 
 Diagnostic records can include private prompts. Diagnostics are always off when the gateway starts. API-key headers are redacted, but request bodies are intentionally kept intact for cache debugging.

@@ -4,6 +4,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
 const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
+const OPENROUTER_AWS_PROVIDER_LOCK = {
+    provider: {
+        order: ['Amazon Bedrock'],
+        allow_fallbacks: false,
+    },
+};
 const SETTINGS_FILE = new URL('./gateway-settings.json', import.meta.url);
 const runtimeSettings = loadRuntimeSettings();
 
@@ -13,6 +19,7 @@ const host = process.env.HOST || '127.0.0.1';
 const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
 let cacheTtl = normalizeCacheTtl(getRuntimeConfigValue('CACHE_TTL', runtimeSettings.cacheTtl, '1h'));
 let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode, 'anthropic'));
+let upstreamExtraJson = normalizeUpstreamExtraJson(getRuntimeConfigValue('UPSTREAM_EXTRA_JSON', runtimeSettings.upstreamExtraJson, {}));
 let captureRequests = false;
 let prefixLockEnabled = false;
 let prefixLock = null;
@@ -37,6 +44,7 @@ function saveRuntimeSettings() {
     writeFileSync(SETTINGS_FILE, `${JSON.stringify({
         cacheTtl: getCacheTtlLabel(),
         upstreamMode,
+        upstreamExtraJson,
     }, null, 2)}\n`);
 }
 
@@ -85,6 +93,46 @@ function normalizeUpstreamMode(mode) {
     return normalized === 'anthropic' ? 'anthropic' : 'openai';
 }
 
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeUpstreamExtraJson(value) {
+    if (value === undefined || value === null || value === '') {
+        return {};
+    }
+
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+
+        if (!trimmed || trimmed.toLowerCase() === 'default' || trimmed.toLowerCase() === 'none' || trimmed === '{}') {
+            return {};
+        }
+
+        const parsed = JSON.parse(trimmed);
+
+        if (!isPlainObject(parsed)) {
+            throw new Error('UPSTREAM_EXTRA_JSON must be a JSON object.');
+        }
+
+        return parsed;
+    }
+
+    if (!isPlainObject(value)) {
+        throw new Error('Upstream extra JSON must be a JSON object.');
+    }
+
+    return safeJsonClone(value);
+}
+
+function getUpstreamExtraJsonText() {
+    return JSON.stringify(upstreamExtraJson, null, 2);
+}
+
+function getUpstreamExtraJsonKeys() {
+    return Object.keys(upstreamExtraJson);
+}
+
 function getCacheTtlLabel() {
     return cacheTtl || 'provider-default';
 }
@@ -108,6 +156,10 @@ function getRuntimeState() {
         upstreamMode,
         cacheTtl: getCacheTtlLabel(),
         cacheControl: getCacheControl(),
+        upstreamExtraJsonEnabled: getUpstreamExtraJsonKeys().length > 0,
+        upstreamExtraJson: safeJsonClone(upstreamExtraJson),
+        upstreamExtraJsonText: getUpstreamExtraJsonText(),
+        upstreamExtraJsonKeys: getUpstreamExtraJsonKeys(),
         captureRequests,
         capturedRequests: requestCaptures.length,
         anthropicInboundEnabled: false,
@@ -859,6 +911,98 @@ function getCacheResultFromUsage(usage) {
     return 'none';
 }
 
+function deepMergeJson(base, extra) {
+    const merged = safeJsonClone(base);
+
+    for (const [key, value] of Object.entries(extra)) {
+        if (isPlainObject(value) && isPlainObject(merged[key])) {
+            merged[key] = deepMergeJson(merged[key], value);
+        } else {
+            merged[key] = safeJsonClone(value);
+        }
+    }
+
+    return merged;
+}
+
+function applyUpstreamExtraJson(body, mode) {
+    const keys = getUpstreamExtraJsonKeys();
+    const diagnostics = {
+        enabled: keys.length > 0,
+        applied: false,
+        appliedKeys: [],
+        bodyHashBefore: getBodyHash(body),
+        bodyHashAfter: getBodyHash(body),
+        skippedReason: null,
+    };
+
+    if (keys.length === 0) {
+        diagnostics.skippedReason = 'empty';
+        return { body, diagnostics };
+    }
+
+    if (mode !== 'openai') {
+        diagnostics.skippedReason = 'upstream-mode-not-openai';
+        return { body, diagnostics };
+    }
+
+    const nextBody = deepMergeJson(body, upstreamExtraJson);
+    diagnostics.applied = true;
+    diagnostics.appliedKeys = keys;
+    diagnostics.bodyHashAfter = getBodyHash(nextBody);
+
+    return { body: nextBody, diagnostics };
+}
+
+function pickProviderBodyField(json) {
+    if (!json || typeof json !== 'object') {
+        return null;
+    }
+
+    const fields = ['provider', 'provider_name', 'model_provider', 'upstream_provider', 'route'];
+
+    for (const field of fields) {
+        if (json[field] !== undefined && json[field] !== null) {
+            return { source: `body.${field}`, value: json[field] };
+        }
+    }
+
+    return null;
+}
+
+function extractUpstreamProviderInfo(headers, json = null) {
+    const headerNames = [
+        'x-openrouter-provider',
+        'x-provider',
+        'x-model-provider',
+        'openrouter-provider',
+        'x-openrouter-model',
+        'x-ratelimit-provider',
+    ];
+
+    for (const name of headerNames) {
+        const value = headers.get(name);
+
+        if (value) {
+            return {
+                provider: value,
+                source: `header.${name}`,
+                responseModel: json?.model ?? null,
+                responseId: json?.id ?? null,
+            };
+        }
+    }
+
+    const bodyField = pickProviderBodyField(json);
+
+    return {
+        provider: bodyField?.value ?? null,
+        source: bodyField?.source ?? 'not-returned',
+        responseModel: json?.model ?? null,
+        responseId: json?.id ?? null,
+    };
+}
+
 function addRequestCapture({ request, originalBody, convertedBody, result, inboundMode = 'openai', inboundPath = '/v1/chat/completions' }) {
     if (!captureRequests) {
         return null;
@@ -879,6 +1023,9 @@ function addRequestCapture({ request, originalBody, convertedBody, result, inbou
             upstreamMode,
             cacheTtl: getCacheTtlLabel(),
             cacheControl: getCacheControl(),
+            upstreamExtraJsonEnabled: getUpstreamExtraJsonKeys().length > 0,
+            upstreamExtraJson: safeJsonClone(upstreamExtraJson),
+            upstreamExtraJsonApplied: null,
             conversion: safeJsonClone(result),
             transformedBody: safeJsonClone(convertedBody),
             transformedBodyHash: getBodyHash(convertedBody),
@@ -918,6 +1065,7 @@ function setCaptureResponse(capture, upstreamResponse, text = null, json = null)
     }
 
     const usage = json ? extractUsage(json) : null;
+    const upstreamProvider = extractUpstreamProviderInfo(upstreamResponse.headers, json);
 
     capture.response = {
         status: upstreamResponse.status,
@@ -927,6 +1075,7 @@ function setCaptureResponse(capture, upstreamResponse, text = null, json = null)
         bodyHash: text !== null ? hashText(text) : null,
         usage,
         cacheResult: usage ? getCacheResultFromUsage(usage) : 'unknown',
+        upstreamProvider,
     };
 }
 
@@ -1355,6 +1504,7 @@ async function proxyChatCompletionsAnthropic(request, body, convertedBody, resul
 
     if (capture) {
         capture.gateway.prefixLock = safeJsonClone(prefixLockResult.diagnostics);
+        capture.gateway.upstreamExtraJsonApplied = safeJsonClone(applyUpstreamExtraJson(anthropicBody, 'anthropic').diagnostics);
     }
 
     const upstreamUrl = buildApiUrl(upstreamBaseUrl, '/v1/messages');
@@ -1565,10 +1715,12 @@ async function proxyChatCompletions(request) {
     }
 
     const prefixLockResult = applyPrefixLock(convertedBody, 'openai');
-    const upstreamBody = prefixLockResult.body;
+    const extraJsonResult = applyUpstreamExtraJson(prefixLockResult.body, 'openai');
+    const upstreamBody = extraJsonResult.body;
 
     if (capture) {
         capture.gateway.prefixLock = safeJsonClone(prefixLockResult.diagnostics);
+        capture.gateway.upstreamExtraJsonApplied = safeJsonClone(extraJsonResult.diagnostics);
     }
 
     const upstreamHeaders = getForwardHeaders(request);
@@ -1681,6 +1833,12 @@ function getCaptureSummary(capture) {
         prefixLockAction: capture.gateway?.prefixLock?.action ?? 'disabled',
         prefixLockReason: capture.gateway?.prefixLock?.reason ?? null,
         prefixLockHash: capture.gateway?.prefixLock?.lockedPrefixHash ?? capture.gateway?.prefixLock?.prefixHash ?? null,
+        upstreamExtraJsonEnabled: Boolean(capture.gateway?.upstreamExtraJsonEnabled),
+        upstreamExtraJsonApplied: Boolean(capture.gateway?.upstreamExtraJsonApplied?.applied),
+        upstreamExtraJsonKeys: capture.gateway?.upstreamExtraJsonApplied?.appliedKeys || [],
+        upstreamProvider: capture.response?.upstreamProvider?.provider ?? null,
+        upstreamProviderSource: capture.response?.upstreamProvider?.source ?? 'not-returned',
+        responseModel: capture.response?.upstreamProvider?.responseModel ?? null,
     };
 }
 
@@ -1702,6 +1860,20 @@ async function handleConsoleApi(request, url) {
         upstreamMode = normalizeUpstreamMode(body?.mode || 'anthropic');
         saveRuntimeSettings();
         log('Updated upstream mode from console.', { upstreamMode });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/upstream-extra-json') {
+        const body = await readJsonRequest(request);
+
+        try {
+            upstreamExtraJson = normalizeUpstreamExtraJson(Object.prototype.hasOwnProperty.call(body || {}, 'json') ? body.json : body?.value);
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+
+        saveRuntimeSettings();
+        log('Updated upstream extra JSON from console.', { upstreamExtraJsonKeys: getUpstreamExtraJsonKeys() });
         return jsonResponse(getRuntimeState());
     }
 
@@ -1770,7 +1942,8 @@ main { max-width: 1120px; margin: 0 auto; }
 h1 { margin: 0 0 8px; font-size: 28px; }
 h2 { margin: 0 0 12px; font-size: 18px; }
 p { margin: 6px 0; }
-button, select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+button, select, textarea { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+textarea { width: 100%; min-height: 150px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button.primary { background: #2f5cff; border-color: #5f82ff; }
@@ -1869,13 +2042,32 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
     <p id="prefixLockDetail" class="muted">加载中...</p>
   </section>
 
+  <section class="card">
+    <h2>5. OpenRouter / 上游额外 JSON 参数</h2>
+    <p class="help warn">这里会把 JSON 对象深度合并到最终上游请求体里，额外参数优先。它只在 OpenAI-compatible 上游格式生效；测试 OpenRouter 时请使用 UPSTREAM_BASE_URL=https://openrouter.ai/api/v1，并把上游格式切到 OpenAI-compatible。</p>
+    <div class="grid" style="margin-top: 12px;">
+      <div class="stat"><div class="label">额外参数</div><div id="extraJsonEnabledText" class="value">加载中</div></div>
+      <div class="stat"><div class="label">键</div><div id="extraJsonKeysText" class="value">加载中</div></div>
+      <div class="stat"><div class="label">当前上游</div><div id="extraJsonModeText" class="value">加载中</div></div>
+    </div>
+    <div style="margin-top: 12px;">
+      <textarea id="upstreamExtraJson" spellcheck="false">{}</textarea>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <button id="extraJsonOff">关闭额外参数</button>
+      <button id="extraJsonAws" class="primary">OpenRouter AWS 锁定</button>
+      <button id="extraJsonFormat">格式化 JSON</button>
+      <button id="extraJsonApply" class="primary">应用</button>
+    </div>
+  </section>
+
   <section class="split">
     <div class="card">
-      <h2>5. 最近请求</h2>
+      <h2>6. 最近请求</h2>
       <div id="requests" class="muted">加载中...</div>
     </div>
     <div class="card">
-      <h2>6. 选中的 JSON</h2>
+      <h2>7. 选中的 JSON</h2>
       <div class="row" style="margin-bottom: 10px;">
         <button id="download" disabled>下载 JSON</button>
         <span id="selectedHint" class="muted">请选择左侧请求</span>
@@ -1923,6 +2115,9 @@ function cacheResultLabel(value) {
 function tokenLabel(value) {
   return value === null || value === undefined ? '-' : value;
 }
+function providerLabel(value, source) {
+  return value ? String(value) + ' (' + source + ')' : '未知 / 未返回';
+}
 function setStatus(text) {
   document.getElementById('selectedHint').textContent = text;
 }
@@ -1935,7 +2130,11 @@ async function loadState() {
   document.getElementById('prefixLockStatusText').textContent = state.prefixLockActive ? '已锁定' : (state.prefixLockEnabled ? '等待下次学习' : '未锁定');
   document.getElementById('prefixLockHashText').textContent = state.prefixLockHash || '-';
   document.getElementById('prefixLockDetail').textContent = '路径 ' + (state.prefixLockFirstCacheControlPath || '-') + ' · 替换 ' + state.prefixLockReplacements + ' · 最近动作 ' + (state.prefixLockLastAction || '-') + ' · 原因 ' + (state.prefixLockLastSkipReason || '-');
-  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl, anthropicInboundEnabled: state.anthropicInboundEnabled, prefixLock: { enabled: state.prefixLockEnabled, active: state.prefixLockActive, hash: state.prefixLockHash } }, null, 2);
+  document.getElementById('extraJsonEnabledText').textContent = state.upstreamExtraJsonEnabled ? '已开启' : '已关闭';
+  document.getElementById('extraJsonKeysText').textContent = state.upstreamExtraJsonKeys.length ? state.upstreamExtraJsonKeys.join(', ') : '-';
+  document.getElementById('extraJsonModeText').textContent = state.upstreamMode === 'openai' ? '会应用' : '不会应用';
+  document.getElementById('upstreamExtraJson').value = state.upstreamExtraJsonText || '{}';
+  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl, anthropicInboundEnabled: state.anthropicInboundEnabled, prefixLock: { enabled: state.prefixLockEnabled, active: state.prefixLockActive, hash: state.prefixLockHash }, upstreamExtraJson: state.upstreamExtraJson }, null, 2);
   document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
   document.getElementById('upstreamMode').value = state.upstreamMode;
 }
@@ -1962,6 +2161,8 @@ async function loadRequests() {
       + ' · 写入 ' + tokenLabel(item.cacheWriteTokens) + ' · 读取 ' + tokenLabel(item.cacheReadTokens)
       + ' · 缓存点 ' + item.cacheControlCount + ' · Prefix ' + (item.prefixHash || '-') + ' / ' + item.prefixLength
       + ' · 锁定 ' + item.prefixLockAction + (item.prefixLockReason ? '(' + item.prefixLockReason + ')' : '')
+      + ' · 额外JSON ' + (item.upstreamExtraJsonApplied ? item.upstreamExtraJsonKeys.join(',') : (item.upstreamExtraJsonEnabled ? '跳过' : '关闭'))
+      + ' · 供应商 ' + providerLabel(item.upstreamProvider, item.upstreamProviderSource)
       + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl)
       + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
     info.append(title, meta);
@@ -1999,6 +2200,10 @@ document.getElementById('clear').onclick = async () => { await api('/console/cle
 document.getElementById('prefixLockOn').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('强制 Prefix 锁定已开启，下一次带缓存点请求会学习或替换'); };
 document.getElementById('prefixLockOff').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('强制 Prefix 锁定已关闭'); };
 document.getElementById('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('已清空锁定 prefix，开启状态下下一次请求会重新学习'); };
+document.getElementById('extraJsonOff').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: {} }) }); await refreshAll(); setStatus('上游额外 JSON 已关闭'); };
+document.getElementById('extraJsonAws').onclick = async () => { document.getElementById('upstreamExtraJson').value = JSON.stringify({ provider: { order: ['Amazon Bedrock'], allow_fallbacks: false } }, null, 2); await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ json: document.getElementById('upstreamExtraJson').value }) }); await refreshAll(); setStatus('OpenRouter AWS 锁定参数已应用。记得上游格式要切到 OpenAI-compatible。'); };
+document.getElementById('extraJsonFormat').onclick = () => { document.getElementById('upstreamExtraJson').value = JSON.stringify(JSON.parse(document.getElementById('upstreamExtraJson').value || '{}'), null, 2); setStatus('额外 JSON 已格式化'); };
+document.getElementById('extraJsonApply').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ json: document.getElementById('upstreamExtraJson').value }) }); await refreshAll(); setStatus('上游额外 JSON 已应用'); };
 document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
 document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
 refreshAll().catch((error) => { document.getElementById('cacheControl').textContent = error.message; });
