@@ -29,7 +29,7 @@
       </div>
       <div>
         <div class="brand-title">Claude Cache</div>
-        <div class="brand-subtitle">多渠道缓存网关</div>
+        <div class="brand-subtitle">缓存块转译网关</div>
       </div>
     </div>
 
@@ -51,7 +51,7 @@
   <main class="main">
     <header class="topbar">
       <div>
-        <div class="eyebrow">Anthropic 体验控制台</div>
+        <div class="eyebrow">Anthropic 控制台</div>
         <h1 id="pageTitle">网关概览</h1>
       </div>
       <div class="status-pills">
@@ -132,7 +132,7 @@
           <div class="channel-form">
             <div class="form-row">
               <label>上游 URL<input id="openRouterUrl" value="https://openrouter.ai/api/v1"></label>
-              <label>锁定供应商<select id="openRouterProvider"><option value="">无（不锁定）</option><option value="Amazon Bedrock">Amazon Bedrock</option><option value="google-vertex">Google Vertex</option><option value="Anthropic">Anthropic</option></select></label>
+              <label>锁定供应商<select id="openRouterProvider"><option value="">无（不锁定）</option><option value="amazon-bedrock">Amazon Bedrock</option><option value="anthropic">Anthropic</option><option value="google-vertex">Google Vertex</option></select></label>
             </div>
             <label>上游格式<select id="openRouterMode"><option value="anthropic">Anthropic native /v1/messages</option><option value="openai" selected>OpenAI-compatible</option></select></label>
           </div>
@@ -293,9 +293,10 @@
     <div class="meta-grid" id="detailMetaGrid"></div>
     <div class="tabs">
       <button class="tab active" data-tab="body">最终请求体</button>
+      <button class="tab" data-tab="upstreamBody">最终请求体 JSON</button>
       <button class="tab" data-tab="summary">网关摘要</button>
       <button class="tab" data-tab="headers">请求头</button>
-      <button class="tab" data-tab="raw">原始 JSON</button>
+      <button class="tab" data-tab="raw">诊断 JSON</button>
     </div>
     <div id="detailBodyTab">
       <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>

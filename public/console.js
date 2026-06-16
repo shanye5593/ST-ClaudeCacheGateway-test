@@ -264,13 +264,24 @@ function channelName(runtime) {
   return 'Custom/当前供应商';
 }
 
+function normalizeOpenRouterProvider(provider) {
+  const normalized = typeof provider === 'string' ? provider.trim() : '';
+  const aliases = {
+    'Amazon Bedrock': 'amazon-bedrock',
+    Anthropic: 'anthropic',
+    'Google Vertex': 'google-vertex',
+    'Google AI Studio': 'google-ai-studio',
+  };
+  return aliases[normalized] || normalized;
+}
+
 function providerFromExtraJson(extraJson) {
   const order = extraJson?.provider?.order;
-  return Array.isArray(order) && order.length ? String(order[0]) : '';
+  return Array.isArray(order) && order.length ? normalizeOpenRouterProvider(String(order[0])) : '';
 }
 
 function providerExtraJson(provider) {
-  const normalized = typeof provider === 'string' ? provider.trim() : '';
+  const normalized = normalizeOpenRouterProvider(provider);
   return normalized ? { provider: { order: [normalized], allow_fallbacks: false } } : {};
 }
 
@@ -479,9 +490,9 @@ function renderChannelCard(profile) {
     const currentProvider = providerFromExtraJson(profile.upstreamExtraJson);
     const providerOptions = [
       ['', '无（不锁定）'],
-      ['Amazon Bedrock', 'Amazon Bedrock'],
+      ['amazon-bedrock', 'Amazon Bedrock'],
+      ['anthropic', 'Anthropic'],
       ['google-vertex', 'Google Vertex'],
-      ['Anthropic', 'Anthropic'],
     ];
     const isKnownProvider = providerOptions.some(([value]) => value === currentProvider);
     for (const [value, label] of providerOptions) {
@@ -888,6 +899,7 @@ function renderDetail() {
   ]);
 
   const tabPayloads = {
+    upstreamBody: item.upstream?.body || item.gateway?.transformedBody || {},
     summary: selectedSummary(),
     headers: {
       inbound: item.inbound?.headersSummary,
