@@ -185,6 +185,11 @@ function setDrawerOpen(id, open) {
   drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
 }
 
+function setMobileNavOpen(open) {
+  document.body.classList.toggle('nav-open', open);
+  $('mobileMenuButton').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 function switchPage(page) {
   for (const item of document.querySelectorAll('.nav-item')) {
     item.classList.toggle('active', item.dataset.page === page);
@@ -193,6 +198,7 @@ function switchPage(page) {
     item.classList.toggle('active', item.id === `page-${page}`);
   }
   $('pageTitle').textContent = pages[page] || page;
+  setMobileNavOpen(false);
   if (page === 'logs') renderRequests();
 }
 
@@ -922,6 +928,8 @@ async function openPrefixModal(event) {
 
 function bindEvents() {
   for (const item of document.querySelectorAll('.nav-item')) item.onclick = () => switchPage(item.dataset.page);
+  $('mobileMenuButton').onclick = () => setMobileNavOpen(!document.body.classList.contains('nav-open'));
+  $('sidebarBackdrop').onclick = () => setMobileNavOpen(false);
 
   $('refreshAll').onclick = () => refreshAll().catch((error) => setStatus(error.message));
   $('dashboardRefresh').onclick = $('refreshAll').onclick;

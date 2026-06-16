@@ -8,7 +8,9 @@
 </head>
 <body>
 <div class="app-shell">
-  <aside class="sidebar">
+  <button class="mobile-menu-button" id="mobileMenuButton" aria-expanded="false" aria-controls="sidebar">菜单</button>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true">
         <svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -98,12 +100,7 @@
       </div>
 
       <div class="two-col">
-        <section class="panel">
-          <div class="panel-head"><h3>当前状态</h3><button class="ghost small" id="dashboardRefresh">刷新</button></div>
-          <div class="kv-list" id="runtimeKv"></div>
-        </section>
-
-        <section class="panel">
+        <section class="panel quick-panel">
           <div class="panel-head"><h3>快速动作</h3></div>
           <div class="quick-stack">
             <div class="quick-row">
@@ -119,6 +116,11 @@
               <div class="seg" id="quickTtlSeg"><button data-ttl="1h">1 小时</button><button data-ttl="">5 分钟</button></div>
             </div>
           </div>
+        </section>
+
+        <section class="panel status-panel">
+          <div class="panel-head"><h3>当前状态</h3><button class="ghost small" id="dashboardRefresh">刷新</button></div>
+          <div class="kv-list" id="runtimeKv"></div>
         </section>
       </div>
     </section>
