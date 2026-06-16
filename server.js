@@ -1127,13 +1127,32 @@ function getBodyHash(body) {
     return hashText(JSON.stringify(body ?? null));
 }
 
+function shouldRedactHeader(name) {
+    const normalized = String(name || '').trim().toLowerCase();
+    const sensitiveHeaders = new Set([
+        'authorization',
+        'proxy-authorization',
+        'x-api-key',
+        'api-key',
+        'cookie',
+        'set-cookie',
+    ]);
+
+    return sensitiveHeaders.has(normalized)
+        || normalized.includes('token')
+        || normalized.includes('secret')
+        || normalized.includes('password')
+        || normalized.includes('credential')
+        || normalized.includes('session');
+}
+
 function summarizeHeaders(headers) {
     const summary = {};
 
     for (const [name, value] of headers.entries()) {
         const normalized = name.toLowerCase();
 
-        if (normalized === 'authorization' || normalized === 'x-api-key' || normalized === 'cookie') {
+        if (shouldRedactHeader(normalized)) {
             summary[normalized] = value ? '[present]' : '[absent]';
             continue;
         }
@@ -2732,289 +2751,6 @@ async function handleConsoleApi(request, url) {
     }
 
     return null;
-}
-
-function getConsoleHtml() {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ST Claude Cache Gateway 控制台</title>
-<style>
-:root { color-scheme: dark; --bg: #0f1117; --panel: #181b24; --panel2: #202431; --border: #343949; --text: #edf1ff; --muted: #9aa3b8; --accent: #7aa2ff; --good: #4ade80; --warn: #facc15; --danger: #fb7185; }
-* { box-sizing: border-box; }
-body { margin: 0; padding: 24px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; background: radial-gradient(circle at top left, #1d2540 0, var(--bg) 42%); color: var(--text); }
-main { max-width: 1120px; margin: 0 auto; }
-h1 { margin: 0 0 8px; font-size: 28px; }
-h2 { margin: 0 0 12px; font-size: 18px; }
-p { margin: 6px 0; }
-button, select, textarea { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
-textarea { width: 100%; min-height: 150px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
-button { cursor: pointer; }
-button:hover:not(:disabled) { border-color: var(--accent); }
-button.primary { background: #2f5cff; border-color: #5f82ff; }
-button.danger { border-color: #7f3142; color: #ffd8df; }
-button:disabled { cursor: not-allowed; opacity: 0.55; }
-select { min-width: 220px; }
-pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-radius: 12px; padding: 12px; overflow: auto; max-height: 48vh; white-space: pre-wrap; word-break: break-word; }
-.header { margin-bottom: 18px; }
-.muted { color: var(--muted); }
-.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin: 14px 0; background: rgba(24, 27, 36, 0.92); box-shadow: 0 12px 28px rgba(0,0,0,.22); }
-.stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
-.stat .label { color: var(--muted); font-size: 12px; }
-.stat .value { margin-top: 4px; font-size: 18px; font-weight: 700; word-break: break-word; }
-.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.help { border-left: 3px solid var(--accent); padding-left: 10px; color: var(--muted); }
-.warn { border-left-color: var(--warn); }
-.badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
-.badge.good { color: #c8ffd9; border-color: #2f7b4a; }
-.badge.warn { color: #fff3b0; border-color: #806d1d; }
-.request { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: 10px 0; background: #141722; }
-.request-title { font-weight: 700; }
-.request-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
-.split { display: grid; grid-template-columns: 320px 1fr; gap: 14px; align-items: start; }
-@media (max-width: 820px) { body { padding: 14px; } .grid, .split { grid-template-columns: 1fr; } }
-</style>
-</head>
-<body>
-<main>
-  <section class="header">
-    <h1>ST Claude Cache Gateway 控制台</h1>
-    <p class="muted">本页面只连接本地网关，用于切换 TTL、检查状态、诊断最终上游请求。推荐酒馆使用 OpenAI-compatible 入站，网关使用 Anthropic native 上游。</p>
-  </section>
-
-  <section class="grid">
-    <div class="stat"><div class="label">缓存模式</div><div id="cacheTtlText" class="value">加载中</div></div>
-    <div class="stat"><div class="label">上游格式</div><div id="upstreamModeText" class="value">加载中</div></div>
-    <div class="stat"><div class="label">请求诊断</div><div id="captureText" class="value">加载中</div></div>
-  </section>
-
-  <section class="card">
-    <h2>1. 缓存 TTL 模式</h2>
-    <p class="help">推荐默认模式：发送 ttl: 1h，使用 Claude 原生 1 小时缓存。也可以切回 provider-default，不发送 ttl，让供应商使用默认 ephemeral 窗口。</p>
-    <div class="row" style="margin-top: 12px;">
-      <label>当前模式
-        <select id="ttl">
-          <option value="1h">1h（默认推荐）</option>
-          <option value="">provider-default / 不发送 ttl</option>
-        </select>
-      </label>
-      <button id="saveTtl" class="primary">应用 TTL</button>
-      <button id="refresh">刷新状态</button>
-    </div>
-    <p class="help warn">网关会记住控制台上一次选择的 TTL 和上游格式，重启后继续沿用。环境变量会优先生效。</p>
-  </section>
-
-  <section class="card">
-    <h2>2. 上游请求格式</h2>
-    <p class="help">默认 Anthropic native 会把酒馆 OpenAI-compatible 请求转换成 /v1/messages，这是当前验证 1h TTL 成功的 Claude 官方格式。需要兼容其他上游时，可切回 OpenAI-compatible。</p>
-    <div class="row" style="margin-top: 12px;">
-      <label>当前上游格式
-        <select id="upstreamMode">
-          <option value="anthropic">Anthropic native /v1/messages（默认推荐）</option>
-          <option value="openai">OpenAI-compatible（兼容模式）</option>
-        </select>
-      </label>
-      <button id="saveUpstreamMode" class="primary">应用上游格式</button>
-    </div>
-    <p class="help warn">Anthropic native 是 Claude 缓存推荐模式；工具调用等高级能力暂不保证完整兼容。OpenAI-compatible 会保留作为切换选项。</p>
-  </section>
-
-  <section class="card">
-    <h2>3. 请求诊断</h2>
-    <p class="help warn">诊断 JSON 会原样记录网关实际发给上游的完整请求体，包括 system / messages / tools / thinking 等参数；只隐藏 Authorization、x-api-key、Cookie。默认关闭；只在排查问题时开启。</p>
-    <div class="row" style="margin-top: 12px;">
-      <button id="captureOn" class="primary">开启诊断</button>
-      <button id="refreshCaptures">刷新诊断列表</button>
-      <button id="captureOff">关闭诊断</button>
-      <button id="clear" class="danger">清空诊断</button>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>4. 强制 Prefix 锁定</h2>
-    <p class="help warn">开启后，第一次带 cache_control 的最终上游请求会被学习为锁定 prefix；后续请求会丢弃本轮缓存点前内容，改用锁定 prefix + 本轮 suffix。换角色、世界书、预设、聊天后请清空锁定。</p>
-    <div class="grid" style="margin-top: 12px;">
-      <div class="stat"><div class="label">锁定开关</div><div id="prefixLockEnabledText" class="value">加载中</div></div>
-      <div class="stat"><div class="label">锁定状态</div><div id="prefixLockStatusText" class="value">加载中</div></div>
-      <div class="stat"><div class="label">锁定 Prefix</div><div id="prefixLockHashText" class="value">加载中</div></div>
-    </div>
-    <div class="row" style="margin-top: 12px;">
-      <button id="prefixLockOn" class="primary">开启强制锁定</button>
-      <button id="prefixLockOff">关闭强制锁定</button>
-      <button id="prefixLockClear" class="danger">清空锁定 / 下次重学</button>
-    </div>
-    <p id="prefixLockDetail" class="muted">加载中...</p>
-  </section>
-
-  <section class="card">
-    <h2>5. OpenRouter / 上游额外 JSON 参数</h2>
-    <p class="help warn">这里会把 JSON 对象深度合并到最终上游请求体里，额外参数优先。它只在 OpenAI-compatible 上游格式生效；测试 OpenRouter 时请使用 UPSTREAM_BASE_URL=https://openrouter.ai/api/v1，并把上游格式切到 OpenAI-compatible。</p>
-    <div class="grid" style="margin-top: 12px;">
-      <div class="stat"><div class="label">额外参数</div><div id="extraJsonEnabledText" class="value">加载中</div></div>
-      <div class="stat"><div class="label">键</div><div id="extraJsonKeysText" class="value">加载中</div></div>
-      <div class="stat"><div class="label">当前上游</div><div id="extraJsonModeText" class="value">加载中</div></div>
-    </div>
-    <div style="margin-top: 12px;">
-      <textarea id="upstreamExtraJson" spellcheck="false">{}</textarea>
-    </div>
-    <div class="row" style="margin-top: 12px;">
-      <button id="extraJsonOff">关闭额外参数</button>
-      <button id="extraJsonFormat">格式化 JSON</button>
-      <button id="extraJsonApply" class="primary">应用</button>
-    </div>
-  </section>
-
-  <section class="split">
-    <div class="card">
-      <h2>6. 最近请求</h2>
-      <div id="requests" class="muted">加载中...</div>
-    </div>
-    <div class="card">
-      <h2>7. 选中的 JSON</h2>
-      <div class="row" style="margin-bottom: 10px;">
-        <button id="download" disabled>下载 JSON</button>
-        <span id="selectedHint" class="muted">请选择左侧请求</span>
-      </div>
-      <pre id="details">暂无选择。</pre>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>当前 cache_control</h2>
-    <pre id="cacheControl">加载中...</pre>
-  </section>
-</main>
-<script>
-let selected = null;
-async function api(path, options) {
-  const response = await fetch(path, options);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
-}
-function downloadJson(data, filename) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-function ttlLabel(value) {
-  return value === '1h' ? '1h（默认推荐）' : 'provider-default / 不发送 ttl';
-}
-function upstreamModeLabel(value) {
-  return value === 'anthropic' ? 'Anthropic native（默认推荐）' : 'OpenAI-compatible（兼容模式）';
-}
-function inboundModeLabel(value) {
-  return value === 'anthropic' ? 'Claude 入站' : 'OpenAI 入站';
-}
-function cacheResultLabel(value) {
-  if (value === 'hit') return '命中';
-  if (value === 'creation') return '写入';
-  if (value === 'none') return '无读写';
-  return '未知';
-}
-function tokenLabel(value) {
-  return value === null || value === undefined ? '-' : value;
-}
-function providerLabel(value, source) {
-  return value ? String(value) + ' (' + source + ')' : '未知 / 未返回';
-}
-function setStatus(text) {
-  document.getElementById('selectedHint').textContent = text;
-}
-async function loadState() {
-  const state = await api('/console/state');
-  document.getElementById('cacheTtlText').textContent = ttlLabel(state.cacheTtl);
-  document.getElementById('upstreamModeText').textContent = upstreamModeLabel(state.upstreamMode);
-  document.getElementById('captureText').textContent = (state.captureRequests ? '已开启' : '已关闭') + ' / ' + state.capturedRequests;
-  document.getElementById('prefixLockEnabledText').textContent = state.prefixLockEnabled ? '已开启' : '已关闭';
-  document.getElementById('prefixLockStatusText').textContent = state.prefixLockActive ? '已锁定' : (state.prefixLockEnabled ? '等待下次学习' : '未锁定');
-  document.getElementById('prefixLockHashText').textContent = state.prefixLockHash || '-';
-  document.getElementById('prefixLockDetail').textContent = '路径 ' + (state.prefixLockFirstCacheControlPath || '-') + ' · 替换 ' + state.prefixLockReplacements + ' · 最近动作 ' + (state.prefixLockLastAction || '-') + ' · 原因 ' + (state.prefixLockLastSkipReason || '-');
-  document.getElementById('extraJsonEnabledText').textContent = state.upstreamExtraJsonEnabled ? '已开启' : '已关闭';
-  document.getElementById('extraJsonKeysText').textContent = state.upstreamExtraJsonKeys.length ? state.upstreamExtraJsonKeys.join(', ') : '-';
-  document.getElementById('extraJsonModeText').textContent = state.upstreamMode === 'openai' ? '会应用' : '不会应用';
-  document.getElementById('upstreamExtraJson').value = state.upstreamExtraJsonText || '{}';
-  document.getElementById('cacheControl').textContent = JSON.stringify({ upstreamMode: state.upstreamMode, cacheControl: state.cacheControl, anthropicInboundEnabled: state.anthropicInboundEnabled, prefixLock: { enabled: state.prefixLockEnabled, active: state.prefixLockActive, hash: state.prefixLockHash }, upstreamExtraJson: state.upstreamExtraJson }, null, 2);
-  document.getElementById('ttl').value = state.cacheTtl === 'provider-default' ? '' : state.cacheTtl;
-  document.getElementById('upstreamMode').value = state.upstreamMode;
-}
-async function loadRequests() {
-  const data = await api('/console/requests');
-  const root = document.getElementById('requests');
-  if (!data.requests.length) {
-    root.innerHTML = '<p class="muted">还没有诊断请求。先点“开启诊断”，再从酒馆发一条消息。</p>';
-    return;
-  }
-  root.innerHTML = '';
-  for (const item of data.requests) {
-    const div = document.createElement('div');
-    div.className = 'request';
-    const info = document.createElement('div');
-    const title = document.createElement('div');
-    title.className = 'request-title';
-    title.textContent = item.model || '未知模型';
-    const meta = document.createElement('div');
-    meta.className = 'request-meta';
-    meta.textContent = item.capturedAt
-      + ' · ' + inboundModeLabel(item.inboundMode) + ' → ' + upstreamModeLabel(item.upstreamMode)
-      + ' · 状态 ' + (item.responseStatus || '-') + ' · ' + cacheResultLabel(item.cacheResult)
-      + ' · 写入 ' + tokenLabel(item.cacheWriteTokens) + ' · 读取 ' + tokenLabel(item.cacheReadTokens)
-      + ' · 缓存点 ' + item.cacheControlCount + ' · Prefix ' + (item.prefixHash || '-') + ' / ' + item.prefixLength
-      + ' · 锁定 ' + item.prefixLockAction + (item.prefixLockReason ? '(' + item.prefixLockReason + ')' : '')
-      + ' · 额外JSON ' + (item.upstreamExtraJsonApplied ? item.upstreamExtraJsonKeys.join(',') : (item.upstreamExtraJsonEnabled ? '跳过' : '关闭'))
-      + ' · 供应商 ' + providerLabel(item.upstreamProvider, item.upstreamProviderSource)
-      + ' · 消息 ' + item.messages + ' · TTL ' + ttlLabel(item.cacheTtl)
-      + ' · 注入 ' + item.injected + ' · 转译 ' + item.removed;
-    info.append(title, meta);
-    const button = document.createElement('button');
-    button.textContent = '查看';
-    button.onclick = () => viewRequest(item.id);
-    div.append(info, button);
-    root.appendChild(div);
-  }
-}
-async function viewRequest(id) {
-  selected = await api('/console/requests/' + encodeURIComponent(id));
-  document.getElementById('details').textContent = JSON.stringify(selected, null, 2);
-  document.getElementById('download').disabled = false;
-  setStatus('已选择：' + selected.id);
-}
-async function refreshAll() {
-  await loadState();
-  await loadRequests();
-}
-document.getElementById('saveTtl').onclick = async () => {
-  await api('/console/cache-ttl', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ttl: document.getElementById('ttl').value }) });
-  await refreshAll();
-  setStatus('TTL 已应用');
-};
-document.getElementById('saveUpstreamMode').onclick = async () => {
-  await api('/console/upstream-mode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: document.getElementById('upstreamMode').value }) });
-  await refreshAll();
-  setStatus('上游格式已应用');
-};
-document.getElementById('captureOn').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('请求诊断已开启，并已刷新列表'); };
-document.getElementById('refreshCaptures').onclick = async () => { await refreshAll(); setStatus('诊断列表已刷新'); };
-document.getElementById('captureOff').onclick = async () => { await api('/console/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('请求诊断已关闭'); };
-document.getElementById('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); selected = null; document.getElementById('details').textContent = '暂无选择。'; document.getElementById('download').disabled = true; await refreshAll(); setStatus('已清空诊断'); };
-document.getElementById('prefixLockOn').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); await refreshAll(); setStatus('强制 Prefix 锁定已开启，下一次带缓存点请求会学习或替换'); };
-document.getElementById('prefixLockOff').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('强制 Prefix 锁定已关闭'); };
-document.getElementById('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('已清空锁定 prefix，开启状态下下一次请求会重新学习'); };
-document.getElementById('extraJsonOff').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: {} }) }); await refreshAll(); setStatus('上游额外 JSON 已关闭'); };
-document.getElementById('extraJsonFormat').onclick = () => { document.getElementById('upstreamExtraJson').value = JSON.stringify(JSON.parse(document.getElementById('upstreamExtraJson').value || '{}'), null, 2); setStatus('额外 JSON 已格式化'); };
-document.getElementById('extraJsonApply').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ json: document.getElementById('upstreamExtraJson').value }) }); await refreshAll(); setStatus('上游额外 JSON 已应用'); };
-document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
-document.getElementById('download').onclick = () => selected && downloadJson(selected, 'st-claude-cache-gateway-request-' + selected.id + '.json');
-refreshAll().catch((error) => { document.getElementById('cacheControl').textContent = error.message; });
-</script>
-</body>
-</html>`;
 }
 
 async function handleRequest(request) {
