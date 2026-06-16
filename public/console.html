@@ -170,7 +170,7 @@
           <h3>Pioneer</h3>
           <div class="channel-form">
             <label>上游 URL<input id="channelBaseUrl" readonly></label>
-            <label>上游格式<select id="channelUpstreamMode"><option value="anthropic">Anthropic native /v1/messages</option><option value="openai">OpenAI-compatible</option></select></label>
+            <label>上游格式<select id="channelUpstreamMode"><option value="anthropic">Anthropic native /v1/messages</option><option value="openai" selected>OpenAI-compatible</option></select></label>
           </div>
           <button id="channelSaveMode">应用上游格式</button>
         </article>
@@ -350,7 +350,7 @@
           <li>Base URL 填 <code>http://127.0.0.1:8788/v1</code>，API Key 填你的上游供应商 Key。</li>
           <li>发送一条测试消息；需要排查时再临时打开“请求诊断”。</li>
         </ol>
-        <p class="guide-callout">默认渠道是 Pioneer，默认上游格式是 Anthropic native。也就是说：客户端用 OAI 方式接入网关，网关再把请求转成 Claude 原生格式发给上游。</p>
+        <p class="guide-callout">默认渠道是 Pioneer，默认上游格式是 OpenAI-compatible。需要 Claude 原生上游时，可在渠道配置中切换为 Anthropic native。</p>
       </section>
       <section class="guide-section" id="g-client">
         <h3>客户端接入</h3>

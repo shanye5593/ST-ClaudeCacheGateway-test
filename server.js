@@ -15,7 +15,7 @@ let activeChannelId = runtimeSettings.activeChannelId;
 let cacheTranslationEnabled = normalizeBoolean(getRuntimeConfigValue('CACHE_TRANSLATION_ENABLED', runtimeSettings.cacheTranslationEnabled, true), true);
 let upstreamBaseUrl = normalizeBaseUrl(getRuntimeConfigValue('UPSTREAM_BASE_URL', getActiveChannel()?.baseUrl, DEFAULT_UPSTREAM_BASE_URL));
 let cacheTtl = normalizeCacheTtl(getRuntimeConfigValue('CACHE_TTL', runtimeSettings.cacheTtl, '1h'));
-let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode || getActiveChannel()?.upstreamMode, 'anthropic'));
+let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode || getActiveChannel()?.upstreamMode, 'openai'));
 let upstreamExtraJson = normalizeUpstreamExtraJson(getRuntimeConfigValue('UPSTREAM_EXTRA_JSON', runtimeSettings.upstreamExtraJson || getActiveChannel()?.upstreamExtraJson, {}));
 let upstreamExcludePaths = normalizeUpstreamExcludePaths(getRuntimeConfigValue('UPSTREAM_EXCLUDE_PATHS', runtimeSettings.upstreamExcludePaths || getActiveChannel()?.upstreamExcludePaths, []));
 let upstreamHeaders = normalizeUpstreamHeaders(getRuntimeConfigValue('UPSTREAM_HEADERS', runtimeSettings.upstreamHeaders || getActiveChannel()?.upstreamHeaders, {}));
@@ -92,7 +92,7 @@ function getDefaultChannelProfiles() {
             name: 'Pioneer',
             kind: 'custom',
             baseUrl: DEFAULT_UPSTREAM_BASE_URL,
-            upstreamMode: 'anthropic',
+            upstreamMode: 'openai',
             upstreamExtraJson: {},
             upstreamExcludePaths: [],
             upstreamHeaders: {},
@@ -288,7 +288,7 @@ function migrateRuntimeSettings(rawSettings = {}) {
                 name: '启动环境上游',
                 kind: 'custom',
                 baseUrl: envBaseUrl,
-                upstreamMode: rawSettings.upstreamMode || 'anthropic',
+                upstreamMode: rawSettings.upstreamMode || 'openai',
                 upstreamExtraJson: rawSettings.upstreamExtraJson || {},
             }, null, { rejectSecrets: false });
             channels = dedupeChannelProfiles([envProfile, ...channels]);
@@ -703,7 +703,7 @@ function getRuntimeState() {
         upstreamExcludeHeadersEnabled: upstreamExcludeHeaders.length > 0,
         captureRequests,
         capturedRequests: requestCaptures.length,
-        anthropicInboundEnabled: false,
+        anthropicInboundEnabled: true,
         prefixLockEnabled,
         prefixLockActive: Boolean(prefixLock),
         prefixLockHash: prefixLock?.prefixHash ?? null,
@@ -2630,7 +2630,7 @@ async function handleConsoleApi(request, url) {
 
     if (request.method === 'POST' && url.pathname === '/console/upstream-mode') {
         const body = await readJsonRequest(request);
-        upstreamMode = normalizeUpstreamMode(body?.mode || 'anthropic');
+        upstreamMode = normalizeUpstreamMode(body?.mode || 'openai');
         syncActiveChannelFromRuntime();
         saveRuntimeSettings();
         log('Updated upstream mode from console.', { upstreamMode, activeChannelId });
@@ -2786,11 +2786,11 @@ async function handleRequest(request) {
         }
 
         if (request.method === 'POST' && url.pathname === '/v1/messages') {
-            return anthropicInboundDisabledResponse(url.pathname);
+            return await proxyAnthropicMessages(request);
         }
 
         if (request.method === 'POST' && url.pathname === '/v1/messages/count_tokens') {
-            return anthropicInboundDisabledResponse(url.pathname);
+            return await proxyAnthropicCountTokens(request);
         }
 
         if (request.method === 'GET' && url.pathname === '/v1/models') {

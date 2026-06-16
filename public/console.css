@@ -355,11 +355,11 @@ tr:hover td { background-color: var(--bg-app); }
 .cache-sub { font-family: var(--font-mono); font-size: 11px; color: #4b7a66; }
 .empty-hint { border: 1px dashed var(--border-strong); border-radius: 10px; padding: 18px; color: var(--text-muted); background: var(--bg-app); }
 
-.guide-toc { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 16px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.guide-toc { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 16px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
 .guide-toc-item { font-size: 12.5px; font-weight: 700; color: var(--text-muted); text-decoration: none; padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background-color: var(--bg-panel); transition: all 0.15s ease; }
 .guide-toc-item:hover { border-color: var(--text-main); color: var(--text-main); }
 .guide-toc-item.active { background-color: var(--text-main); border-color: var(--text-main); color: #fff; }
-.guide-body { display: flex; flex-direction: column; }
+.guide-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding-right: 4px; }
 .guide-section { padding: 22px 0; border-bottom: 1px dashed var(--border); }
 .guide-section:last-child { border-bottom: 0; }
 .guide-section h3 { font-size: 18px; font-weight: 800; margin: 0 0 10px; }
@@ -442,6 +442,8 @@ tr:hover td { background-color: var(--bg-app); }
   .log-action-cell::before { display: none; }
   .log-action-cell button { width: 100%; }
   .drawer-panel { width: 100vw; height: 100vh; height: 100dvh; padding: 22px 22px calc(34px + env(safe-area-inset-bottom, 0px)); }
+  .guide-toc { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 10px; }
+  .guide-toc-item { flex: 0 0 auto; }
   .tabs { overflow-x: auto; padding-bottom: 4px; }
   .detail-tabs { margin-left: -22px; margin-right: -22px; padding-left: 22px; padding-right: 22px; }
   .tab { flex: 0 0 auto; }

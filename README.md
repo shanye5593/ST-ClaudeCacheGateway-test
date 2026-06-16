@@ -20,7 +20,7 @@ API Key: 你的上游供应商 API Key
 ## 功能概览
 
 - 接收 OpenAI-compatible `POST /v1/chat/completions` 请求。
-- 默认把客户端请求转换为 Anthropic native `/v1/messages` 上游格式，以便使用 Claude prompt cache。
+- 默认使用 Pioneer 的 OpenAI-compatible 上游格式，也可切换为 Anthropic native `/v1/messages`。
 - 支持 `[[CACHE_BREAK]]` 手动缓存标记。
 - 支持 Claude `cache_control` 注入，最多 4 个缓存断点。
 - 支持 1 小时缓存 TTL 或供应商默认缓存窗口。
@@ -111,7 +111,14 @@ API Key: 你的上游供应商 API Key
 Model: 你的上游模型名
 ```
 
-不要使用酒馆的 Claude / Anthropic-compatible 入站模式连接这个网关。当前网关的 Claude 入站 `POST /v1/messages` 是故意禁用的，因为酒馆 Claude-compatible 请求在测试中可能反复改写缓存结构。推荐路径是：
+也可以使用 Claude / Anthropic-compatible 原生入站：
+
+```text
+POST http://127.0.0.1:8788/v1/messages
+POST http://127.0.0.1:8788/v1/messages/count_tokens
+```
+
+使用 Claude 原生入站时，请把当前渠道的上游格式保持为 Anthropic native。酒馆场景仍优先推荐 OpenAI-compatible / Chat Completion 接入：
 
 ```text
 酒馆 OpenAI-compatible 请求 -> 本地网关 -> Anthropic native 或 OpenAI-compatible 上游
@@ -242,7 +249,7 @@ CACHE_TTL=default npm start
 
 默认渠道：
 
-- Pioneer：默认自定义渠道，默认连接 `https://api.pioneer.ai`。
+- Pioneer：默认自定义渠道，默认连接 `https://api.pioneer.ai`，上游格式默认 OpenAI-compatible。
 - OpenRouter：内置模板，默认 `https://openrouter.ai/api/v1`，上游格式通常用 OpenAI-compatible。
 - Anthropic：内置模板。
 - Google Vertex AI：内置模板。
@@ -365,7 +372,7 @@ x-forwarded-for
 | `HOST` | `127.0.0.1` | 监听地址。默认仅本机访问。 |
 | `PORT` | `8788` | 监听端口。 |
 | `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | 启动时的上游地址默认 / 覆盖。 |
-| `UPSTREAM_MODE` | `anthropic` | 上游格式：`anthropic` 或 `openai`。 |
+| `UPSTREAM_MODE` | `openai` | 上游格式：`anthropic` 或 `openai`。 |
 | `UPSTREAM_EXTRA_JSON` | `{}` | 启动时包含主体参数。 |
 | `UPSTREAM_EXCLUDE_PATHS` | 空 | 启动时排除主体参数，逗号或换行分隔。 |
 | `UPSTREAM_HEADERS` | `{}` | 启动时包含请求头。不要写密钥。 |
@@ -415,7 +422,7 @@ curl http://127.0.0.1:8788/health
   "host": "127.0.0.1",
   "port": 8788,
   "upstreamBaseUrl": "https://api.pioneer.ai",
-  "upstreamMode": "anthropic",
+  "upstreamMode": "openai",
   "cacheTtl": "1h"
 }
 ```
