@@ -134,7 +134,7 @@ function cacheInjectLabel(item) {
   const injected = item?.injected ?? 0;
   const removed = item?.removed ?? 0;
   const count = item?.cacheControlCount ?? 0;
-  if (injected > 0 || removed > 0 || count > 0) return `注入 ${injected} / 缓存点 ${count}`;
+  if (injected > 0 || removed > 0 || count > 0) return `转换 ${removed} / 缓存点 ${count}`;
   return '未注入';
 }
 
@@ -142,10 +142,6 @@ function prefixActionLabel(item) {
   const action = item?.prefixLockAction || 'disabled';
   const reason = item?.prefixLockReason;
   return reason ? `${action} · ${reason}` : action;
-}
-
-function providerLabel(item) {
-  return item?.upstreamProvider ? String(item.upstreamProvider) : 'unknown';
 }
 
 function compactHash(value) {
@@ -321,8 +317,6 @@ function renderCaptureControls() {
 function renderDashboard() {
   const runtime = state.runtime;
   if (!runtime) return;
-  const latestProvider = state.requests.find((item) => item.upstreamProvider)?.upstreamProvider;
-
   $('sidebarAddress').textContent = `${runtime.host}:${runtime.port}`;
   $('statCacheTranslation').textContent = runtime.cacheTranslationEnabled ? '开启' : '关闭';
   $('cacheTranslationSwitch').checked = Boolean(runtime.cacheTranslationEnabled);
@@ -343,7 +337,7 @@ function renderDashboard() {
     ['缓存转译', runtime.cacheTranslationEnabled ? '开启' : '关闭'],
     ['上游连接', runtime.upstreamBaseUrl, { mono: true }],
     ['上游格式', upstreamModeLabel(runtime.upstreamMode)],
-    ['当前供应商', latestProvider || channelName(runtime)],
+    ['当前渠道', channelName(runtime)],
     ['最新 Prefix Hash', runtime.prefixLockHash || '-', { mono: true }],
     ['额外 JSON 键', runtime.upstreamExtraJsonEnabled ? runtime.upstreamExtraJsonKeys.join(', ') : '关闭'],
   ]);
@@ -486,9 +480,8 @@ function renderChannelCard(profile) {
     const providerOptions = [
       ['', '无（不锁定）'],
       ['Amazon Bedrock', 'Amazon Bedrock'],
-      ['Google Vertex', 'Google Vertex'],
+      ['google-vertex', 'Google Vertex'],
       ['Anthropic', 'Anthropic'],
-      ['Google AI Studio', 'Google AI Studio'],
     ];
     const isKnownProvider = providerOptions.some(([value]) => value === currentProvider);
     for (const [value, label] of providerOptions) {
@@ -676,9 +669,9 @@ function renderRequests() {
 
     const injection = tableCell(tr, '', '', '缓存注入');
     appendText(injection, 'span', cacheInjectLabel(item), `badge ${item.injected > 0 || item.cacheControlCount > 0 ? 'success' : ''}`.trim());
-    if (item.removed || item.overflowRemoved) {
+    if (item.injected || item.overflowRemoved) {
       injection.appendChild(document.createElement('br'));
-      appendText(injection, 'small', `移除 ${item.removed || 0} / 溢出 ${item.overflowRemoved || 0}`);
+      appendText(injection, 'small', `注入 ${item.injected || 0} / 溢出 ${item.overflowRemoved || 0}`);
     }
 
     const prefix = tableCell(tr, '', 'td-mono', 'Prefix');
@@ -696,7 +689,7 @@ function renderRequests() {
     const channel = tableCell(tr, '', '', '渠道');
     channel.append(document.createTextNode(channelName(state.runtime)));
     channel.appendChild(document.createElement('br'));
-    appendText(channel, 'small', providerLabel(item) === 'unknown' ? '供应商未返回' : providerLabel(item));
+    appendText(channel, 'small', item.upstreamMode ? upstreamModeLabel(item.upstreamMode) : '');
 
     rows.appendChild(tr);
   }
@@ -879,20 +872,19 @@ function renderRequestBodyStream(root, capture, prefixOnly = false) {
 function renderDetail() {
   const item = state.selected;
   if (!item) return;
-  const provider = item.response?.upstreamProvider || {};
   const usage = item.response?.usage || {};
   $('drawerTitle').textContent = item.upstream?.body?.model || item.gateway?.transformedBody?.model || item.id;
-  $('drawerEyebrow').textContent = `${channelName(state.runtime)} · ${provider.provider || 'provider not returned'}`;
+  $('drawerEyebrow').textContent = channelName(state.runtime);
   $('detailId').textContent = `ID: ${item.id}`;
   renderMetaGrid($('detailMetaGrid'), [
     ['响应状态', item.response?.status],
     ['缓存转译', item.gateway?.cacheTranslationEnabled ? '开启' : '关闭'],
     ['注入断点', item.gateway?.conversion?.injected ?? 0, (item.gateway?.conversion?.injected ?? 0) > 0 ? 'success' : ''],
-    ['移除标记', item.gateway?.conversion?.removed ?? 0],
+    ['转换标记', item.gateway?.conversion?.removed ?? 0],
     ['缓存点数量', item.upstream?.cache?.cacheControlCount ?? 0],
     ['Prefix 动作', item.gateway?.prefixLock?.action || 'disabled'],
     ['上游统计', usage.inputTokens || usage.cacheReadTokens || usage.cacheWriteTokens || usage.outputTokens ? '已返回' : '未返回'],
-    ['上游供应商', provider.provider || '未返回', provider.provider ? 'coral' : ''],
+    ['当前渠道', channelName(state.runtime)],
   ]);
 
   const tabPayloads = {
