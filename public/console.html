@@ -57,7 +57,7 @@
       <div class="status-pills">
         <span class="pill" id="topChannel">渠道：加载中</span>
         <span class="pill" id="topCapture">诊断：加载中</span>
-        <span class="pill" id="topPrefix">强制锁定：加载中</span>
+        <span class="pill" id="topPrefix">锁定：加载中</span>
       </div>
     </header>
 
@@ -108,7 +108,7 @@
               <label class="switch" aria-label="快速切换请求诊断"><input type="checkbox" id="quickCaptureSwitch"><span class="track"></span><span class="thumb"></span></label>
             </div>
             <div class="quick-row">
-              <span>强制 Prefix 锁定 <em id="mockLockState">加载中</em></span>
+              <span>Prefix 锁定 <em id="mockLockState">加载中</em></span>
               <div class="quick-controls"><button class="ghost small" id="quickPrefixRefresh">刷新</button><label class="switch" aria-label="快速切换 Prefix 锁定"><input type="checkbox" id="quickPrefixSwitch"><span class="track"></span><span class="thumb"></span></label></div>
             </div>
             <div class="quick-row">
@@ -211,7 +211,7 @@
       </section>
 
       <section class="panel">
-        <div class="panel-head"><h3>强制 Prefix 锁定</h3><span class="lock-state-badge" id="prefixLockBadge">加载中</span></div>
+        <div class="panel-head"><h3>强制 Prefix 锁定</h3><span class="panel-actions"><button class="ghost small" id="prefixLockRefresh">刷新状态</button><span class="lock-state-badge" id="prefixLockBadge">加载中</span></span></div>
         <div class="set-row">
           <div class="set-info"><div class="set-title">开启强制锁定</div><div class="set-desc">首个带缓存点的请求会学习其前缀；之后请求强制替换为锁定前缀，杜绝前缀漂移导致的缓存失效。</div></div>
           <div class="set-control"><label class="switch"><input type="checkbox" id="prefixLockSwitch"><span class="track"></span><span class="thumb"></span></label></div>
@@ -290,14 +290,14 @@
       <div><div class="eyebrow" id="drawerEyebrow">Request Detail</div><h2 id="drawerTitle">请求详情</h2></div>
       <button id="closeDrawer" class="ghost">✕</button>
     </div>
-    <div class="meta-grid" id="detailMetaGrid"></div>
-    <div class="tabs">
+    <div class="tabs detail-tabs">
       <button class="tab active" data-tab="body">最终请求体</button>
       <button class="tab" data-tab="upstreamBody">最终请求体 JSON</button>
       <button class="tab" data-tab="summary">网关摘要</button>
       <button class="tab" data-tab="headers">请求头</button>
       <button class="tab" data-tab="raw">诊断 JSON</button>
     </div>
+    <div class="meta-grid" id="detailMetaGrid"></div>
     <div id="detailBodyTab">
       <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
       <div class="body-stream" id="detailBodyStream"></div>

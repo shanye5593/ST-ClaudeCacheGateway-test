@@ -190,6 +190,7 @@ code {
   font-weight: 700;
   box-shadow: var(--shadow-flat);
   min-height: 32px;
+  white-space: nowrap;
 }
 .pill.active { border-color: var(--text-main); background-color: var(--bg-hover); color: var(--text-main); }
 .badge.success, .tag.success, .cache-hit { background-color: var(--success-soft); color: var(--success); border-color: #add8c3; }
@@ -217,6 +218,7 @@ code {
 .two-col { display: grid; grid-template-columns: minmax(320px, 0.65fr) minmax(0, 1fr); gap: 18px; }
 .panel { padding: 24px; margin-bottom: 18px; }
 .panel-head, .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; border-bottom: 1px dashed var(--border); padding-bottom: 12px; }
+.panel-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .section-head { align-items: flex-start; }
 .panel-head h3, .section-head h2 { margin: 0; font-weight: 800; }
 .section-head p { color: var(--text-muted); margin: 8px 0 0; }
@@ -306,6 +308,7 @@ tr:hover td { background-color: var(--bg-app); }
 .drawer-head h2 { font-size: 22px; font-weight: 800; margin: 0; }
 .drawer-actions { margin-top: auto; padding-top: 18px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.detail-tabs { position: sticky; top: -28px; z-index: 3; background: var(--bg-panel); padding-top: 4px; }
 .tab { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; box-shadow: none; color: var(--text-muted); padding: 8px 14px; font-size: 13.5px; }
 .tab:hover { background-color: var(--bg-hover); color: var(--text-main); transform: none; }
 .tab.active { border-bottom-color: var(--primary-coral); color: var(--text-main); }
@@ -414,6 +417,8 @@ tr:hover td { background-color: var(--bg-app); }
   .nav { grid-template-columns: 1fr; }
   .main { padding: 18px 14px calc(128px + env(safe-area-inset-bottom, 0px)); }
   .topbar { padding-left: 0; }
+  .status-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .status-pills .pill { flex: 0 1 auto; max-width: 100%; justify-content: center; padding: 5px 9px; font-size: 11.5px; }
   .topbar, .hero-card, .section-head, .set-row, .log-toolbar { flex-direction: column; align-items: stretch; }
   .quick-row { flex-direction: row; align-items: center; }
   .quick-controls { justify-content: flex-end; }
@@ -434,6 +439,7 @@ tr:hover td { background-color: var(--bg-app); }
   .log-action-cell button { width: 100%; }
   .drawer-panel { width: 100vw; height: 100vh; height: 100dvh; padding: 22px 22px calc(34px + env(safe-area-inset-bottom, 0px)); }
   .tabs { overflow-x: auto; padding-bottom: 4px; }
+  .detail-tabs { top: -22px; margin-left: -22px; margin-right: -22px; padding-left: 22px; padding-right: 22px; }
   .tab { flex: 0 0 auto; }
   #detailPre { min-height: 52vh; }
   .kv { grid-template-columns: 1fr; gap: 4px; }

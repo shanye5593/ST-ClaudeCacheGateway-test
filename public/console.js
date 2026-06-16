@@ -302,7 +302,7 @@ function renderTopbar() {
   if (!runtime) return;
   $('topChannel').textContent = `渠道：${channelName(runtime)}`;
   $('topCapture').textContent = `诊断：${runtime.captureRequests ? '开启' : '关闭'} / ${runtime.capturedRequests}`;
-  $('topPrefix').textContent = `强制锁定：${runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '学习中' : '关闭'}`;
+  $('topPrefix').textContent = `锁定：${runtime.prefixLockActive ? '开启' : runtime.prefixLockEnabled ? '学习' : '关闭'}`;
 }
 
 function setSegActive(rootId, value) {
@@ -337,7 +337,7 @@ function renderDashboard() {
   $('statPrefixHash').textContent = compactHash(runtime.prefixLockHash);
   $('statPrefixDetail').textContent = runtime.prefixLockActive ? `${runtime.prefixLockReplacements || 0} 次替换 · ${runtime.prefixLockFirstCacheControlPath || '-'}` : '尚未锁定';
   renderCaptureControls();
-  $('mockLockState').textContent = runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '学习中' : '已关闭';
+  $('mockLockState').textContent = runtime.prefixLockActive ? '开启' : runtime.prefixLockEnabled ? '学习' : '关闭';
   $('mockLockState').style.color = runtime.prefixLockEnabled ? 'var(--success)' : 'var(--text-muted)';
   $('quickPrefixSwitch').checked = Boolean(runtime.prefixLockEnabled);
   $('mockTtlState').textContent = ttlLabel(runtime.cacheTtl);
@@ -584,7 +584,7 @@ function renderCache() {
   if (!runtime) return;
   setSegActive('cacheTtlSeg', runtime.cacheTtl === '1h' ? '1h' : '');
   $('prefixLockSwitch').checked = runtime.prefixLockEnabled;
-  $('prefixLockBadge').textContent = runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '等待学习' : '关闭';
+  $('prefixLockBadge').textContent = runtime.prefixLockActive ? '开启' : runtime.prefixLockEnabled ? '学习' : '关闭';
   $('prefixLockBadge').classList.toggle('off', !runtime.prefixLockEnabled);
   renderKv($('prefixLockKv'), [
     ['锁定前缀 ID', runtime.prefixLockHash, { link: openPrefixModal }],
@@ -1008,6 +1008,7 @@ function bindEvents() {
 
   for (const button of document.querySelectorAll('#quickTtlSeg button, #cacheTtlSeg button')) button.onclick = () => applyTtl(button.dataset.ttl);
   $('prefixLockSwitch').onchange = async () => { await postJson('/console/prefix-lock', { enabled: $('prefixLockSwitch').checked }); await refreshAll(); setStatus($('prefixLockSwitch').checked ? 'Prefix Lock 已开启' : 'Prefix Lock 已关闭并清空'); };
+  $('prefixLockRefresh').onclick = async () => { await refreshAll(); setStatus('Prefix Lock 状态已刷新'); };
   $('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('Prefix Lock 已清空'); };
   $('prefixModalClear').onclick = $('prefixLockClear').onclick;
 
