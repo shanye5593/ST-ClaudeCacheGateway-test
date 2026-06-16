@@ -185,9 +185,36 @@ function setDrawerOpen(id, open) {
   drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
 }
 
+function setMobileMenuHidden(hidden) {
+  if (document.body.classList.contains('nav-open')) return;
+  document.body.classList.toggle('mobile-menu-hidden', hidden);
+}
+
 function setMobileNavOpen(open) {
   document.body.classList.toggle('nav-open', open);
+  document.body.classList.remove('mobile-menu-hidden');
   $('mobileMenuButton').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function bindMobileMenuScroll() {
+  let lastY = window.scrollY || 0;
+
+  window.addEventListener('scroll', () => {
+    if (window.innerWidth > 980 || document.body.classList.contains('nav-open')) return;
+
+    const currentY = window.scrollY || 0;
+    const delta = currentY - lastY;
+
+    if (Math.abs(delta) < 8) return;
+
+    if (delta > 0 && currentY > 80) {
+      setMobileMenuHidden(true);
+    } else if (delta < 0) {
+      setMobileMenuHidden(false);
+    }
+
+    lastY = currentY;
+  }, { passive: true });
 }
 
 function switchPage(page) {
@@ -576,9 +603,10 @@ function filteredRequests() {
   });
 }
 
-function tableCell(row, value, className) {
+function tableCell(row, value, className, label) {
   const td = document.createElement('td');
   if (className) td.className = className;
+  if (label) td.dataset.label = label;
   td.textContent = text(value);
   row.appendChild(td);
   return td;
@@ -603,37 +631,39 @@ function renderRequests() {
 
   for (const item of pageItems) {
     const tr = document.createElement('tr');
-    tableCell(tr, timeLabel(item.capturedAt));
 
-    const model = tableCell(tr, '');
+    const action = tableCell(tr, '', 'log-action-cell', '详情');
+    const button = appendText(action, 'button', '详情', 'small primary');
+    button.onclick = () => viewRequest(item.id);
+
+    tableCell(tr, timeLabel(item.capturedAt), '', '时间');
+
+    const model = tableCell(tr, '', '', '模型');
     appendText(model, 'strong', text(item.model, '未知模型'));
     model.appendChild(document.createElement('br'));
     appendText(model, 'small', upstreamModeLabel(item.upstreamMode));
 
-    const provider = tableCell(tr, '');
+    const provider = tableCell(tr, '', '', '渠道 / 供应商');
     provider.append(document.createTextNode(providerLabel(item)));
     provider.appendChild(document.createElement('br'));
     appendText(provider, 'small', text(item.upstreamProviderSource, 'not-returned'));
 
-    tableCell(tr, text(item.responseStatus));
+    tableCell(tr, text(item.responseStatus), '', '状态');
 
-    const cache = tableCell(tr, '');
+    const cache = tableCell(tr, '', '', '缓存结果');
     const badge = appendText(cache, 'span', cacheResultLabel(item.cacheResult), `badge ${cacheClass(item.cacheResult, item.responseStatus)}`);
     badge.classList.add(cacheClass(item.cacheResult, item.responseStatus));
 
-    const prefix = tableCell(tr, '', 'td-mono');
+    const prefix = tableCell(tr, '', 'td-mono', 'Prefix Hash');
     prefix.append(document.createTextNode(compactHash(item.prefixHash)));
     prefix.appendChild(document.createElement('br'));
     appendText(prefix, 'small', `${item.prefixLength || 0} chars`);
 
-    const usage = tableCell(tr, '');
+    const usage = tableCell(tr, '', '', '用量');
     usage.append(document.createTextNode(`读 ${tokenLabel(item.cacheReadTokens)}`));
     usage.appendChild(document.createElement('br'));
     usage.append(document.createTextNode(`写 ${tokenLabel(item.cacheWriteTokens)}`));
 
-    const action = tableCell(tr, '');
-    const button = appendText(action, 'button', '详情', 'small');
-    button.onclick = () => viewRequest(item.id);
     rows.appendChild(tr);
   }
 
@@ -992,6 +1022,7 @@ function bindEvents() {
 }
 
 bindEvents();
+bindMobileMenuScroll();
 refreshAll().catch((error) => {
   setStatus(error.message);
   $('cacheControl').textContent = error.message;
