@@ -75,6 +75,8 @@ button.primary:hover:not(:disabled) {
 button.ghost { background-color: transparent; border-color: transparent; box-shadow: none; }
 button.ghost:hover:not(:disabled) { background-color: var(--bg-hover); }
 button.small { padding: 6px 10px; font-size: 12px; }
+button.pill-btn { border-radius: 999px; }
+button.small.pill-btn { padding: 6px 16px; }
 button.danger-light { background-color: var(--danger-soft); border-color: #fecdd3; color: var(--danger); }
 button.danger-light:hover:not(:disabled) { background-color: #ffe4e6; border-color: var(--danger); }
 
@@ -432,10 +434,11 @@ tr:hover td { background-color: var(--bg-app); }
   tbody, tr, td { display: block; width: 100%; }
   tr { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); box-shadow: var(--shadow-flat); }
   tr:hover td { background: transparent; }
-  td { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+  td { display: block; padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 13px; line-height: 1.5; word-break: break-word; }
   td:last-child { border-bottom: 0; }
-  td::before { content: attr(data-label); color: var(--text-muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
-  .log-action-cell { display: block; padding-top: 0; }
+  td::before { content: attr(data-label); display: block; margin-bottom: 3px; color: var(--text-muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
+  td small { color: var(--text-muted); }
+  .log-action-cell { padding-top: 4px; padding-bottom: 2px; }
   .log-action-cell::before { display: none; }
   .log-action-cell button { width: 100%; }
   .drawer-panel { width: 100vw; height: 100vh; height: 100dvh; padding: 22px 22px calc(34px + env(safe-area-inset-bottom, 0px)); }
