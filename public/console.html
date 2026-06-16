@@ -348,9 +348,8 @@
           <li>启动网关，确认控制台地址为 <code>http://127.0.0.1:8788/console</code>。</li>
           <li>在酒馆 / 客户端里选择 OpenAI-compatible / Chat Completion 接入。</li>
           <li>Base URL 填 <code>http://127.0.0.1:8788/v1</code>，API Key 填你的上游供应商 Key。</li>
-          <li>发送一条测试消息；需要排查时再临时打开“请求诊断”。</li>
         </ol>
-        <p class="guide-callout">默认渠道是 Pioneer，默认上游格式是 OpenAI-compatible。需要 Claude 原生上游时，可在渠道配置中切换为 Anthropic native。</p>
+        <p class="guide-callout">酒馆里选择的是“入站格式”，决定客户端用哪种协议发给本地网关；控制台里的“上游格式”决定网关再用哪种协议转发给供应商。两者可以不同，例如酒馆用 OpenAI-compatible 接入，网关再按当前渠道设置转发到 OpenAI-compatible 或 Anthropic native 上游。</p>
       </section>
       <section class="guide-section" id="g-client">
         <h3>客户端接入</h3>

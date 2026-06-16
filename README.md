@@ -118,11 +118,13 @@ POST http://127.0.0.1:8788/v1/messages
 POST http://127.0.0.1:8788/v1/messages/count_tokens
 ```
 
-使用 Claude 原生入站时，请把当前渠道的上游格式保持为 Anthropic native。酒馆场景仍优先推荐 OpenAI-compatible / Chat Completion 接入：
+酒馆里选择的是“入站格式”，决定客户端用哪种协议发给本地网关；控制台里的“上游格式”决定网关再用哪种协议转发给供应商。两者可以不同，例如：
 
 ```text
-酒馆 OpenAI-compatible 请求 -> 本地网关 -> Anthropic native 或 OpenAI-compatible 上游
+酒馆 OpenAI-compatible 请求 -> 本地网关 -> OpenAI-compatible 或 Anthropic native 上游
 ```
+
+如果使用 Claude 原生入站，请把当前渠道的上游格式保持为 Anthropic native。
 
 ## 缓存标记 `[[CACHE_BREAK]]`
 
