@@ -4,22 +4,23 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const MARKER = '[[CACHE_BREAK]]';
 const MAX_BREAKPOINTS = 4;
 const DEFAULT_UPSTREAM_BASE_URL = 'https://api.pioneer.ai';
-const OPENROUTER_AWS_PROVIDER_LOCK = {
-    provider: {
-        order: ['Amazon Bedrock'],
-        allow_fallbacks: false,
-    },
-};
 const SETTINGS_FILE = new URL('./gateway-settings.json', import.meta.url);
-const runtimeSettings = loadRuntimeSettings();
+const runtimeSettings = migrateRuntimeSettings(loadRuntimeSettings());
 
-const DEFAULT_PORT = 8789;
+const DEFAULT_PORT = 8788;
 const port = Number(process.env.PORT || DEFAULT_PORT);
 const host = process.env.HOST || '127.0.0.1';
-const upstreamBaseUrl = normalizeBaseUrl(process.env.UPSTREAM_BASE_URL || DEFAULT_UPSTREAM_BASE_URL);
+let channelProfiles = runtimeSettings.channels;
+let activeChannelId = runtimeSettings.activeChannelId;
+let cacheTranslationEnabled = normalizeBoolean(getRuntimeConfigValue('CACHE_TRANSLATION_ENABLED', runtimeSettings.cacheTranslationEnabled, true), true);
+let upstreamBaseUrl = normalizeBaseUrl(getRuntimeConfigValue('UPSTREAM_BASE_URL', getActiveChannel()?.baseUrl, DEFAULT_UPSTREAM_BASE_URL));
 let cacheTtl = normalizeCacheTtl(getRuntimeConfigValue('CACHE_TTL', runtimeSettings.cacheTtl, '1h'));
-let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode, 'anthropic'));
-let upstreamExtraJson = normalizeUpstreamExtraJson(getRuntimeConfigValue('UPSTREAM_EXTRA_JSON', runtimeSettings.upstreamExtraJson, {}));
+let upstreamMode = normalizeUpstreamMode(getRuntimeConfigValue('UPSTREAM_MODE', runtimeSettings.upstreamMode || getActiveChannel()?.upstreamMode, 'anthropic'));
+let upstreamExtraJson = normalizeUpstreamExtraJson(getRuntimeConfigValue('UPSTREAM_EXTRA_JSON', runtimeSettings.upstreamExtraJson || getActiveChannel()?.upstreamExtraJson, {}));
+let upstreamExcludePaths = normalizeUpstreamExcludePaths(getRuntimeConfigValue('UPSTREAM_EXCLUDE_PATHS', runtimeSettings.upstreamExcludePaths || getActiveChannel()?.upstreamExcludePaths, []));
+let upstreamHeaders = normalizeUpstreamHeaders(getRuntimeConfigValue('UPSTREAM_HEADERS', runtimeSettings.upstreamHeaders || getActiveChannel()?.upstreamHeaders, {}));
+let upstreamExcludeHeaders = normalizeUpstreamExcludeHeaders(getRuntimeConfigValue('UPSTREAM_EXCLUDE_HEADERS', runtimeSettings.upstreamExcludeHeaders || getActiveChannel()?.upstreamExcludeHeaders, []));
+syncActiveChannelFromRuntime();
 let captureRequests = false;
 let prefixLockEnabled = false;
 let prefixLock = null;
@@ -40,11 +41,359 @@ function loadRuntimeSettings() {
     }
 }
 
+function getDefaultChannelProfiles() {
+    return [
+        {
+            id: 'openrouter',
+            name: 'OpenRouter',
+            kind: 'builtin',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            upstreamMode: 'openai',
+            upstreamExtraJson: {},
+            upstreamExcludePaths: [],
+            upstreamHeaders: {},
+            upstreamExcludeHeaders: [],
+        },
+        {
+            id: 'anthropic',
+            name: 'Anthropic',
+            kind: 'builtin',
+            baseUrl: 'https://api.anthropic.com',
+            upstreamMode: 'anthropic',
+            upstreamExtraJson: {},
+            upstreamExcludePaths: [],
+            upstreamHeaders: {},
+            upstreamExcludeHeaders: [],
+        },
+        {
+            id: 'vertex',
+            name: 'Google Vertex AI',
+            kind: 'builtin',
+            baseUrl: 'https://us-east5-aiplatform.googleapis.com',
+            upstreamMode: 'anthropic',
+            upstreamExtraJson: {},
+            upstreamExcludePaths: [],
+            upstreamHeaders: {},
+            upstreamExcludeHeaders: [],
+        },
+        {
+            id: 'bedrock',
+            name: 'Amazon Bedrock',
+            kind: 'builtin',
+            baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+            upstreamMode: 'anthropic',
+            upstreamExtraJson: {},
+            upstreamExcludePaths: [],
+            upstreamHeaders: {},
+            upstreamExcludeHeaders: [],
+        },
+        {
+            id: 'pioneer',
+            name: 'Pioneer',
+            kind: 'custom',
+            baseUrl: DEFAULT_UPSTREAM_BASE_URL,
+            upstreamMode: 'anthropic',
+            upstreamExtraJson: {},
+            upstreamExcludePaths: [],
+            upstreamHeaders: {},
+            upstreamExcludeHeaders: [],
+        }
+    ];
+}
+
+function sanitizeChannelId(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48);
+}
+
+function makeUniqueChannelId(name) {
+    const base = sanitizeChannelId(name) || 'custom-channel';
+    let id = base;
+    let index = 1;
+
+    while (channelProfiles?.some((profile) => profile.id === id)) {
+        index += 1;
+        id = `${base}-${index}`;
+    }
+
+    return id;
+}
+
+function normalizeChannelBaseUrl(value) {
+    const raw = String(value || '').trim();
+
+    if (!raw) {
+        throw new Error('Channel base URL is required.');
+    }
+
+    if (raw.length > 500) {
+        throw new Error('Channel base URL is too long.');
+    }
+
+    let parsed;
+
+    try {
+        parsed = new URL(raw);
+    } catch {
+        throw new Error('Channel base URL must be an absolute URL.');
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('Channel base URL must use http or https.');
+    }
+
+    if (parsed.username || parsed.password) {
+        throw new Error('Channel base URL must not include username or password.');
+    }
+
+    return normalizeBaseUrl(raw);
+}
+
+function assertSafeProfileJson(value, path = 'upstreamExtraJson', options = {}) {
+    if (!value || typeof value !== 'object') {
+        return;
+    }
+
+    const rejectSecrets = options.rejectSecrets !== false;
+    const forbiddenKeys = new Set(['__proto__', 'prototype', 'constructor']);
+    const secretKeys = new Set(['authorization', 'x-api-key', 'api_key', 'apikey', 'token', 'secret', 'password']);
+
+    for (const [key, child] of Object.entries(value)) {
+        const normalized = key.toLowerCase();
+
+        if (forbiddenKeys.has(normalized)) {
+            throw new Error(`Unsafe JSON key is not allowed: ${path}.${key}`);
+        }
+
+        if (rejectSecrets && secretKeys.has(normalized)) {
+            throw new Error(`Do not store secrets in channel profiles: ${path}.${key}`);
+        }
+
+        if (child && typeof child === 'object') {
+            assertSafeProfileJson(child, `${path}.${key}`, options);
+        }
+    }
+}
+
+function normalizeChannelProfile(input, existingProfile = null, options = {}) {
+    const allowGeneratedId = Boolean(options.allowGeneratedId);
+    const rejectSecrets = options.rejectSecrets !== false;
+    const current = existingProfile || {};
+    const id = current.id || sanitizeChannelId(input?.id) || (allowGeneratedId ? makeUniqueChannelId(input?.name) : '');
+    const kind = current.kind === 'builtin' ? 'builtin' : input?.kind === 'builtin' ? 'builtin' : 'custom';
+    const name = String(input?.name ?? current.name ?? '').trim();
+
+    if (!id) {
+        throw new Error('Channel id is required.');
+    }
+
+    if (!name || name.length > 80) {
+        throw new Error('Channel name must be 1-80 characters.');
+    }
+
+    const upstreamExtraJson = normalizeUpstreamExtraJson(
+        Object.prototype.hasOwnProperty.call(input || {}, 'upstreamExtraJson')
+            ? input.upstreamExtraJson
+            : current.upstreamExtraJson || {},
+    );
+    const jsonSize = JSON.stringify(upstreamExtraJson).length;
+
+    if (jsonSize > 32768) {
+        throw new Error('Channel upstream extra JSON is too large.');
+    }
+
+    assertSafeProfileJson(upstreamExtraJson, 'upstreamExtraJson', { rejectSecrets });
+
+    return {
+        id,
+        name,
+        kind,
+        baseUrl: normalizeChannelBaseUrl(input?.baseUrl ?? current.baseUrl),
+        upstreamMode: normalizeUpstreamMode(input?.upstreamMode ?? current.upstreamMode),
+        upstreamExtraJson,
+        upstreamExcludePaths: normalizeUpstreamExcludePaths(
+            Object.prototype.hasOwnProperty.call(input || {}, 'upstreamExcludePaths')
+                ? input.upstreamExcludePaths
+                : current.upstreamExcludePaths || [],
+        ),
+        upstreamHeaders: normalizeUpstreamHeaders(
+            Object.prototype.hasOwnProperty.call(input || {}, 'upstreamHeaders')
+                ? input.upstreamHeaders
+                : current.upstreamHeaders || {},
+        ),
+        upstreamExcludeHeaders: normalizeUpstreamExcludeHeaders(
+            Object.prototype.hasOwnProperty.call(input || {}, 'upstreamExcludeHeaders')
+                ? input.upstreamExcludeHeaders
+                : current.upstreamExcludeHeaders || [],
+        ),
+    };
+}
+
+function dedupeChannelProfiles(profiles) {
+    const seen = new Set();
+    const output = [];
+
+    for (const profile of profiles) {
+        if (!profile?.id || seen.has(profile.id)) {
+            continue;
+        }
+
+        seen.add(profile.id);
+        output.push(profile);
+    }
+
+    return output;
+}
+
+function findChannelByBaseUrl(baseUrl, profiles) {
+    const normalized = normalizeBaseUrl(baseUrl);
+    return profiles.find((profile) => normalizeBaseUrl(profile.baseUrl) === normalized) || null;
+}
+
+function migrateRuntimeSettings(rawSettings = {}) {
+    const defaults = getDefaultChannelProfiles().map((profile) => normalizeChannelProfile(profile, null, { rejectSecrets: false }));
+    const hasSavedChannels = Array.isArray(rawSettings.channels);
+    const savedProfiles = hasSavedChannels
+        ? rawSettings.channels.map((profile) => {
+            const builtin = defaults.find((item) => item.kind === 'builtin' && item.id === profile?.id);
+            return normalizeChannelProfile({
+                ...profile,
+                kind: builtin ? profile?.kind : 'custom',
+            }, builtin || null, { rejectSecrets: false });
+        })
+        : [];
+    const defaultsToSeed = hasSavedChannels ? defaults.filter((profile) => profile.kind === 'builtin') : defaults;
+    const profileMap = new Map(defaultsToSeed.map((profile) => [profile.id, profile]));
+
+    for (const profile of savedProfiles) {
+        profileMap.set(profile.id, profile);
+    }
+
+    let channels = dedupeChannelProfiles([...profileMap.values()]);
+    const envBaseUrl = process.env.UPSTREAM_BASE_URL ? normalizeChannelBaseUrl(process.env.UPSTREAM_BASE_URL) : null;
+    let activeId = sanitizeChannelId(rawSettings.activeChannelId) || 'pioneer';
+
+    if (envBaseUrl) {
+        const match = findChannelByBaseUrl(envBaseUrl, channels);
+
+        if (match) {
+            activeId = match.id;
+        } else {
+            const envProfile = normalizeChannelProfile({
+                id: 'env-upstream',
+                name: '启动环境上游',
+                kind: 'custom',
+                baseUrl: envBaseUrl,
+                upstreamMode: rawSettings.upstreamMode || 'anthropic',
+                upstreamExtraJson: rawSettings.upstreamExtraJson || {},
+            }, null, { rejectSecrets: false });
+            channels = dedupeChannelProfiles([envProfile, ...channels]);
+            activeId = envProfile.id;
+        }
+    } else if (!channels.some((profile) => profile.id === activeId)) {
+        activeId = 'pioneer';
+    }
+
+    const activeProfile = channels.find((profile) => profile.id === activeId) || channels.find((profile) => profile.id === 'pioneer') || channels[0];
+    activeId = activeProfile.id;
+
+    if (!Array.isArray(rawSettings.channels)) {
+        activeProfile.upstreamMode = normalizeUpstreamMode(rawSettings.upstreamMode || activeProfile.upstreamMode);
+        activeProfile.upstreamExtraJson = normalizeUpstreamExtraJson(rawSettings.upstreamExtraJson || activeProfile.upstreamExtraJson || {});
+        activeProfile.upstreamExcludePaths = normalizeUpstreamExcludePaths(rawSettings.upstreamExcludePaths || activeProfile.upstreamExcludePaths || []);
+        activeProfile.upstreamHeaders = normalizeUpstreamHeaders(rawSettings.upstreamHeaders || activeProfile.upstreamHeaders || {});
+        activeProfile.upstreamExcludeHeaders = normalizeUpstreamExcludeHeaders(rawSettings.upstreamExcludeHeaders || activeProfile.upstreamExcludeHeaders || []);
+    }
+
+    return {
+        ...rawSettings,
+        schemaVersion: 2,
+        cacheTtl: rawSettings.cacheTtl,
+        activeChannelId: activeId,
+        channels,
+        upstreamMode: activeProfile.upstreamMode,
+        upstreamExtraJson: safeJsonClone(activeProfile.upstreamExtraJson),
+        upstreamExcludePaths: normalizeUpstreamExcludePaths(activeProfile.upstreamExcludePaths || []),
+        upstreamHeaders: normalizeUpstreamHeaders(activeProfile.upstreamHeaders || {}),
+        upstreamExcludeHeaders: normalizeUpstreamExcludeHeaders(activeProfile.upstreamExcludeHeaders || []),
+    };
+}
+
+function getActiveChannel() {
+    return channelProfiles?.find((profile) => profile.id === activeChannelId) || null;
+}
+
+function getSafeChannelProfile(profile) {
+    return profile ? safeJsonClone(profile) : null;
+}
+
+function syncRuntimeFromActiveChannel() {
+    const active = getActiveChannel();
+
+    if (!active) {
+        return;
+    }
+
+    upstreamBaseUrl = normalizeBaseUrl(active.baseUrl);
+    upstreamMode = normalizeUpstreamMode(active.upstreamMode);
+    upstreamExtraJson = normalizeUpstreamExtraJson(active.upstreamExtraJson || {});
+    upstreamExcludePaths = normalizeUpstreamExcludePaths(active.upstreamExcludePaths || []);
+    upstreamHeaders = normalizeUpstreamHeaders(active.upstreamHeaders || {});
+    upstreamExcludeHeaders = normalizeUpstreamExcludeHeaders(active.upstreamExcludeHeaders || []);
+}
+
+function syncActiveChannelFromRuntime() {
+    const active = getActiveChannel();
+
+    if (!active) {
+        return;
+    }
+
+    active.baseUrl = normalizeBaseUrl(upstreamBaseUrl);
+    active.upstreamMode = normalizeUpstreamMode(upstreamMode);
+    active.upstreamExtraJson = normalizeUpstreamExtraJson(upstreamExtraJson || {});
+    active.upstreamExcludePaths = normalizeUpstreamExcludePaths(upstreamExcludePaths || []);
+    active.upstreamHeaders = normalizeUpstreamHeaders(upstreamHeaders || {});
+    active.upstreamExcludeHeaders = normalizeUpstreamExcludeHeaders(upstreamExcludeHeaders || []);
+}
+
+function setActiveChannel(id) {
+    const normalizedId = sanitizeChannelId(id);
+
+    if (!channelProfiles.some((profile) => profile.id === normalizedId)) {
+        throw new Error('Channel not found.');
+    }
+
+    activeChannelId = normalizedId;
+    syncRuntimeFromActiveChannel();
+}
+
+function getChannelState() {
+    return {
+        ok: true,
+        activeChannelId,
+        activeChannel: getSafeChannelProfile(getActiveChannel()),
+        channels: channelProfiles.map(getSafeChannelProfile),
+    };
+}
+
 function saveRuntimeSettings() {
+    syncActiveChannelFromRuntime();
     writeFileSync(SETTINGS_FILE, `${JSON.stringify({
+        schemaVersion: 2,
+        cacheTranslationEnabled,
         cacheTtl: getCacheTtlLabel(),
+        activeChannelId,
+        channels: channelProfiles.map(getSafeChannelProfile),
         upstreamMode,
         upstreamExtraJson,
+        upstreamExcludePaths,
+        upstreamHeaders,
+        upstreamExcludeHeaders,
     }, null, 2)}\n`);
 }
 
@@ -73,6 +422,28 @@ function getApiRoot(baseUrl) {
 
 function buildApiUrl(baseUrl, path) {
     return `${getApiRoot(baseUrl)}${path}`;
+}
+
+function normalizeBoolean(value, defaultValue = false) {
+    if (value === undefined || value === null || value === '') {
+        return defaultValue;
+    }
+
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    const normalized = String(value).trim().toLowerCase();
+
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) {
+        return true;
+    }
+
+    if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) {
+        return false;
+    }
+
+    return defaultValue;
 }
 
 function normalizeCacheTtl(ttl) {
@@ -125,8 +496,164 @@ function normalizeUpstreamExtraJson(value) {
     return safeJsonClone(value);
 }
 
+function normalizeUpstreamExcludePaths(value) {
+    const items = Array.isArray(value)
+        ? value
+        : String(value || '')
+            .split(/\r?\n|,/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+    const seen = new Set();
+    const output = [];
+
+    for (const item of items) {
+        const path = String(item || '').trim();
+
+        if (!path) {
+            continue;
+        }
+
+        if (path.length > 160) {
+            throw new Error('Upstream exclude path is too long.');
+        }
+
+        if (!/^[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*$/.test(path)) {
+            throw new Error(`Invalid upstream exclude path: ${path}`);
+        }
+
+        if (!seen.has(path)) {
+            seen.add(path);
+            output.push(path);
+        }
+    }
+
+    if (output.length > 64) {
+        throw new Error('Too many upstream exclude paths.');
+    }
+
+    return output;
+}
+
+function normalizeUpstreamHeaders(value) {
+    const input = typeof value === 'string' ? normalizeUpstreamExtraJson(value) : value;
+
+    if (input === undefined || input === null || input === '') {
+        return {};
+    }
+
+    if (!isPlainObject(input)) {
+        throw new Error('Upstream headers must be a JSON object.');
+    }
+
+    const blocked = new Set([
+        'authorization',
+        'x-api-key',
+        'api-key',
+        'cookie',
+        'set-cookie',
+        'host',
+        'content-length',
+        'content-type',
+        'connection',
+        'transfer-encoding',
+        'proxy-authorization',
+        'proxy-authenticate',
+    ]);
+    const output = {};
+
+    for (const [name, rawValue] of Object.entries(input)) {
+        const normalized = String(name || '').trim().toLowerCase();
+
+        if (!normalized) {
+            continue;
+        }
+
+        if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(normalized)) {
+            throw new Error(`Invalid upstream header name: ${name}`);
+        }
+
+        if (blocked.has(normalized) || normalized.includes('secret') || normalized.includes('token') || normalized.includes('password')) {
+            throw new Error(`Do not store secrets or protocol headers in channel profiles: ${name}`);
+        }
+
+        if (rawValue === undefined || rawValue === null || rawValue === '') {
+            continue;
+        }
+
+        if (typeof rawValue !== 'string' && typeof rawValue !== 'number' && typeof rawValue !== 'boolean') {
+            throw new Error(`Upstream header value must be a string, number, or boolean: ${name}`);
+        }
+
+        const headerValue = String(rawValue);
+
+        if (headerValue.length > 1000 || /[\r\n]/.test(headerValue)) {
+            throw new Error(`Invalid upstream header value: ${name}`);
+        }
+
+        output[normalized] = headerValue;
+    }
+
+    return output;
+}
+
+function normalizeHeaderName(name) {
+    const normalized = String(name || '').trim().toLowerCase();
+
+    if (!normalized || !/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(normalized)) {
+        throw new Error(`Invalid upstream header name: ${name}`);
+    }
+
+    return normalized;
+}
+
+function normalizeUpstreamExcludeHeaders(value) {
+    const items = Array.isArray(value)
+        ? value
+        : String(value || '')
+            .split(/\r?\n|,/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+    const seen = new Set();
+    const output = [];
+
+    for (const item of items) {
+        const name = normalizeHeaderName(item);
+
+        if (name.length > 120) {
+            throw new Error('Upstream exclude header name is too long.');
+        }
+
+        if (!seen.has(name)) {
+            seen.add(name);
+            output.push(name);
+        }
+    }
+
+    if (output.length > 64) {
+        throw new Error('Too many upstream exclude headers.');
+    }
+
+    return output;
+}
+
+function getUpstreamHeadersText() {
+    return JSON.stringify(upstreamHeaders, null, 2);
+}
+
+function getUpstreamHeaderKeys() {
+    return Object.keys(upstreamHeaders);
+}
+
+function getUpstreamExcludeHeadersText() {
+    return upstreamExcludeHeaders.join('\n');
+}
+
 function getUpstreamExtraJsonText() {
     return JSON.stringify(upstreamExtraJson, null, 2);
+}
+
+function getUpstreamExcludePathsText() {
+    return upstreamExcludePaths.join('\n');
 }
 
 function getUpstreamExtraJsonKeys() {
@@ -154,12 +681,26 @@ function getRuntimeState() {
         port,
         upstreamBaseUrl,
         upstreamMode,
+        activeChannelId,
+        activeChannel: getSafeChannelProfile(getActiveChannel()),
+        channels: channelProfiles.map(getSafeChannelProfile),
+        cacheTranslationEnabled,
         cacheTtl: getCacheTtlLabel(),
         cacheControl: getCacheControl(),
         upstreamExtraJsonEnabled: getUpstreamExtraJsonKeys().length > 0,
         upstreamExtraJson: safeJsonClone(upstreamExtraJson),
         upstreamExtraJsonText: getUpstreamExtraJsonText(),
         upstreamExtraJsonKeys: getUpstreamExtraJsonKeys(),
+        upstreamExcludePaths: [...upstreamExcludePaths],
+        upstreamExcludePathsText: getUpstreamExcludePathsText(),
+        upstreamExcludePathsEnabled: upstreamExcludePaths.length > 0,
+        upstreamHeaders: safeJsonClone(upstreamHeaders),
+        upstreamHeadersText: getUpstreamHeadersText(),
+        upstreamHeadersKeys: getUpstreamHeaderKeys(),
+        upstreamHeadersEnabled: getUpstreamHeaderKeys().length > 0,
+        upstreamExcludeHeaders: [...upstreamExcludeHeaders],
+        upstreamExcludeHeadersText: getUpstreamExcludeHeadersText(),
+        upstreamExcludeHeadersEnabled: upstreamExcludeHeaders.length > 0,
         captureRequests,
         capturedRequests: requestCaptures.length,
         anthropicInboundEnabled: false,
@@ -454,6 +995,18 @@ function removeOverflowMarkers(messages) {
 }
 
 function applyCacheBreaks(messages, initialExistingBreakpoints = 0) {
+    if (!cacheTranslationEnabled) {
+        return {
+            existingBreakpoints: countExistingCacheBreakpoints(messages),
+            injected: 0,
+            removed: 0,
+            changedMessages: 0,
+            modifiedMessages: [],
+            overflowRemoved: 0,
+            disabled: true,
+        };
+    }
+
     const existingBreakpoints = initialExistingBreakpoints + countExistingCacheBreakpoints(messages);
     let remainingBreakpoints = Math.max(0, MAX_BREAKPOINTS - existingBreakpoints);
     let injected = 0;
@@ -816,6 +1369,11 @@ function clearPrefixLock() {
 }
 
 function applyPrefixLock(body, mode) {
+    if (!cacheTranslationEnabled) {
+        updatePrefixLockStats('skipped', 'cache-translation-disabled');
+        return { body, diagnostics: { enabled: prefixLockEnabled, action: 'skipped', reason: 'cache-translation-disabled' } };
+    }
+
     if (!prefixLockEnabled) {
         updatePrefixLockStats('disabled');
         return { body, diagnostics: { enabled: false, action: 'disabled' } };
@@ -925,18 +1483,44 @@ function deepMergeJson(base, extra) {
     return merged;
 }
 
-function applyUpstreamExtraJson(body, mode) {
-    const keys = getUpstreamExtraJsonKeys();
+function deleteJsonPath(root, path) {
+    const parts = path.split('.');
+    let current = root;
+
+    for (const part of parts.slice(0, -1)) {
+        if (!isPlainObject(current) || !(part in current)) {
+            return false;
+        }
+
+        current = current[part];
+    }
+
+    const last = parts[parts.length - 1];
+
+    if (!isPlainObject(current) || !(last in current)) {
+        return false;
+    }
+
+    delete current[last];
+    return true;
+}
+
+function applyUpstreamBodyParameters(body, mode) {
+    const includeKeys = getUpstreamExtraJsonKeys();
+    const excludePaths = upstreamExcludePaths;
     const diagnostics = {
-        enabled: keys.length > 0,
+        includeEnabled: includeKeys.length > 0,
+        excludeEnabled: excludePaths.length > 0,
         applied: false,
         appliedKeys: [],
+        excludedPaths: [],
+        missingExcludePaths: [],
         bodyHashBefore: getBodyHash(body),
         bodyHashAfter: getBodyHash(body),
         skippedReason: null,
     };
 
-    if (keys.length === 0) {
+    if (includeKeys.length === 0 && excludePaths.length === 0) {
         diagnostics.skippedReason = 'empty';
         return { body, diagnostics };
     }
@@ -946,12 +1530,25 @@ function applyUpstreamExtraJson(body, mode) {
         return { body, diagnostics };
     }
 
-    const nextBody = deepMergeJson(body, upstreamExtraJson);
-    diagnostics.applied = true;
-    diagnostics.appliedKeys = keys;
+    const nextBody = includeKeys.length > 0 ? deepMergeJson(body, upstreamExtraJson) : safeJsonClone(body);
+
+    for (const path of excludePaths) {
+        if (deleteJsonPath(nextBody, path)) {
+            diagnostics.excludedPaths.push(path);
+        } else {
+            diagnostics.missingExcludePaths.push(path);
+        }
+    }
+
+    diagnostics.applied = includeKeys.length > 0 || diagnostics.excludedPaths.length > 0;
+    diagnostics.appliedKeys = includeKeys;
     diagnostics.bodyHashAfter = getBodyHash(nextBody);
 
     return { body: nextBody, diagnostics };
+}
+
+function applyUpstreamExtraJson(body, mode) {
+    return applyUpstreamBodyParameters(body, mode);
 }
 
 function pickProviderBodyField(json) {
@@ -1021,6 +1618,7 @@ function addRequestCapture({ request, originalBody, convertedBody, result, inbou
         },
         gateway: {
             upstreamMode,
+            cacheTranslationEnabled,
             cacheTtl: getCacheTtlLabel(),
             cacheControl: getCacheControl(),
             upstreamExtraJsonEnabled: getUpstreamExtraJsonKeys().length > 0,
@@ -1089,6 +1687,18 @@ async function readJsonRequest(request) {
     return JSON.parse(text);
 }
 
+function applyUpstreamHeaderOverrides(headers) {
+    for (const [name, value] of Object.entries(upstreamHeaders)) {
+        headers.set(name, value);
+    }
+
+    for (const name of upstreamExcludeHeaders) {
+        headers.delete(name);
+    }
+
+    return headers;
+}
+
 function getForwardHeaders(request) {
     const headers = new Headers();
     const authorization = request.headers.get('authorization') || process.env.UPSTREAM_API_KEY;
@@ -1098,6 +1708,7 @@ function getForwardHeaders(request) {
     }
 
     headers.set('content-type', 'application/json');
+    applyUpstreamHeaderOverrides(headers);
 
     return headers;
 }
@@ -1137,6 +1748,8 @@ function getAnthropicHeaders(request) {
     if (anthropicBeta) {
         headers.set('anthropic-beta', anthropicBeta);
     }
+
+    applyUpstreamHeaderOverrides(headers);
 
     return headers;
 }
@@ -1311,6 +1924,12 @@ function applyAnthropicCacheBreaks(body) {
         modifiedMessages: [],
         overflowRemoved: 0,
     };
+
+    if (!cacheTranslationEnabled) {
+        result.disabled = true;
+        return result;
+    }
+
     let remainingBreakpoints = MAX_BREAKPOINTS;
 
     const systemResult = transformAnthropicSystem(body.system, remainingBreakpoints);
@@ -1804,6 +2423,17 @@ function htmlResponse(html) {
     });
 }
 
+function staticTextResponse(path, contentType) {
+    return new Response(readFileSync(new URL(path, import.meta.url), 'utf8'), {
+        status: 200,
+        headers: addCorsHeaders(new Headers({ 'content-type': contentType })),
+    });
+}
+
+function consoleResponse() {
+    return staticTextResponse('./public/console.html', 'text/html; charset=utf-8');
+}
+
 function getCaptureSummary(capture) {
     const upstreamBody = capture.upstream?.body;
     const usage = capture.response?.usage || {};
@@ -1814,6 +2444,7 @@ function getCaptureSummary(capture) {
         model: upstreamBody?.model ?? capture.gateway?.transformedBody?.model ?? null,
         stream: Boolean(upstreamBody?.stream ?? capture.gateway?.transformedBody?.stream),
         messages: Array.isArray(upstreamBody?.messages) ? upstreamBody.messages.length : 0,
+        cacheTranslationEnabled: capture.gateway?.cacheTranslationEnabled ?? true,
         cacheTtl: capture.gateway?.cacheTtl ?? null,
         inboundMode: capture.inbound?.mode ?? null,
         upstreamMode: capture.gateway?.upstreamMode ?? null,
@@ -1842,7 +2473,122 @@ function getCaptureSummary(capture) {
     };
 }
 
+async function handleConsoleChannels(request, url) {
+    if (request.method === 'GET' && url.pathname === '/console/channels') {
+        return jsonResponse(getChannelState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/channels') {
+        try {
+            const body = await readJsonRequest(request);
+            const profile = normalizeChannelProfile({
+                ...body,
+                id: makeUniqueChannelId(body?.name || 'custom-channel'),
+                kind: 'custom',
+            }, null, { allowGeneratedId: true });
+            channelProfiles.push(profile);
+            activeChannelId = profile.id;
+            syncRuntimeFromActiveChannel();
+            saveRuntimeSettings();
+            log('Created channel profile from console.', {
+                channelId: profile.id,
+                name: profile.name,
+                baseUrl: profile.baseUrl,
+                upstreamMode: profile.upstreamMode,
+                upstreamExtraJsonKeys: Object.keys(profile.upstreamExtraJson),
+            });
+            return jsonResponse(getRuntimeState());
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+    }
+
+    if (!url.pathname.startsWith('/console/channels/')) {
+        return null;
+    }
+
+    const parts = url.pathname.split('/').filter(Boolean);
+    const id = sanitizeChannelId(decodeURIComponent(parts[2] || ''));
+    const action = parts[3] || null;
+    const index = channelProfiles.findIndex((profile) => profile.id === id);
+
+    if (index < 0) {
+        return jsonResponse({ error: 'Channel not found.' }, 404);
+    }
+
+    const profile = channelProfiles[index];
+
+    if (request.method === 'POST' && action === 'activate') {
+        try {
+            setActiveChannel(profile.id);
+            saveRuntimeSettings();
+            log('Activated channel profile from console.', {
+                channelId: profile.id,
+                name: profile.name,
+                baseUrl: profile.baseUrl,
+                upstreamMode: profile.upstreamMode,
+            });
+            return jsonResponse(getRuntimeState());
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+    }
+
+    if (request.method === 'POST' && action === 'delete') {
+        if (profile.kind === 'builtin') {
+            return jsonResponse({ error: 'Built-in channels cannot be deleted.' }, 400);
+        }
+
+        channelProfiles.splice(index, 1);
+
+        if (activeChannelId === profile.id) {
+            setActiveChannel(channelProfiles.some((item) => item.id === 'pioneer') ? 'pioneer' : channelProfiles[0].id);
+        }
+
+        saveRuntimeSettings();
+        log('Deleted channel profile from console.', { channelId: profile.id, name: profile.name });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && !action) {
+        try {
+            const body = await readJsonRequest(request);
+            const nextProfile = normalizeChannelProfile({
+                ...body,
+                id: profile.id,
+                kind: profile.kind,
+                name: profile.kind === 'builtin' ? profile.name : body?.name,
+            }, profile);
+            channelProfiles[index] = nextProfile;
+
+            if (activeChannelId === nextProfile.id) {
+                syncRuntimeFromActiveChannel();
+            }
+
+            saveRuntimeSettings();
+            log('Updated channel profile from console.', {
+                channelId: nextProfile.id,
+                name: nextProfile.name,
+                baseUrl: nextProfile.baseUrl,
+                upstreamMode: nextProfile.upstreamMode,
+                upstreamExtraJsonKeys: Object.keys(nextProfile.upstreamExtraJson),
+            });
+            return jsonResponse(getRuntimeState());
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+    }
+
+    return null;
+}
+
 async function handleConsoleApi(request, url) {
+    const channelResponse = await handleConsoleChannels(request, url);
+
+    if (channelResponse) {
+        return channelResponse;
+    }
+
     if (request.method === 'GET' && url.pathname === '/console/state') {
         return jsonResponse(getRuntimeState());
     }
@@ -1855,11 +2601,20 @@ async function handleConsoleApi(request, url) {
         return jsonResponse(getRuntimeState());
     }
 
+    if (request.method === 'POST' && url.pathname === '/console/cache-translation') {
+        const body = await readJsonRequest(request);
+        cacheTranslationEnabled = normalizeBoolean(body?.enabled, true);
+        saveRuntimeSettings();
+        log('Updated cache translation setting from console.', { cacheTranslationEnabled });
+        return jsonResponse(getRuntimeState());
+    }
+
     if (request.method === 'POST' && url.pathname === '/console/upstream-mode') {
         const body = await readJsonRequest(request);
         upstreamMode = normalizeUpstreamMode(body?.mode || 'anthropic');
+        syncActiveChannelFromRuntime();
         saveRuntimeSettings();
-        log('Updated upstream mode from console.', { upstreamMode });
+        log('Updated upstream mode from console.', { upstreamMode, activeChannelId });
         return jsonResponse(getRuntimeState());
     }
 
@@ -1872,8 +2627,60 @@ async function handleConsoleApi(request, url) {
             return jsonResponse({ error: error.message }, 400);
         }
 
+        try {
+            assertSafeProfileJson(upstreamExtraJson);
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+
+        syncActiveChannelFromRuntime();
         saveRuntimeSettings();
-        log('Updated upstream extra JSON from console.', { upstreamExtraJsonKeys: getUpstreamExtraJsonKeys() });
+        log('Updated upstream extra JSON from console.', { activeChannelId, upstreamExtraJsonKeys: getUpstreamExtraJsonKeys() });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/upstream-exclude-paths') {
+        const body = await readJsonRequest(request);
+
+        try {
+            upstreamExcludePaths = normalizeUpstreamExcludePaths(Object.prototype.hasOwnProperty.call(body || {}, 'paths') ? body.paths : body?.value);
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+
+        syncActiveChannelFromRuntime();
+        saveRuntimeSettings();
+        log('Updated upstream exclude paths from console.', { activeChannelId, upstreamExcludePaths });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/upstream-headers') {
+        const body = await readJsonRequest(request);
+
+        try {
+            upstreamHeaders = normalizeUpstreamHeaders(Object.prototype.hasOwnProperty.call(body || {}, 'headers') ? body.headers : body?.value);
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+
+        syncActiveChannelFromRuntime();
+        saveRuntimeSettings();
+        log('Updated upstream header overrides from console.', { activeChannelId, upstreamHeaderKeys: getUpstreamHeaderKeys() });
+        return jsonResponse(getRuntimeState());
+    }
+
+    if (request.method === 'POST' && url.pathname === '/console/upstream-exclude-headers') {
+        const body = await readJsonRequest(request);
+
+        try {
+            upstreamExcludeHeaders = normalizeUpstreamExcludeHeaders(Object.prototype.hasOwnProperty.call(body || {}, 'headers') ? body.headers : body?.value);
+        } catch (error) {
+            return jsonResponse({ error: error.message }, 400);
+        }
+
+        syncActiveChannelFromRuntime();
+        saveRuntimeSettings();
+        log('Updated upstream excluded headers from console.', { activeChannelId, upstreamExcludeHeaders });
         return jsonResponse(getRuntimeState());
     }
 
@@ -1889,7 +2696,7 @@ async function handleConsoleApi(request, url) {
         prefixLockEnabled = Boolean(body?.enabled);
 
         if (!prefixLockEnabled) {
-            updatePrefixLockStats('disabled');
+            clearPrefixLock();
         } else {
             updatePrefixLockStats(prefixLock ? 'enabled' : 'learning');
         }
@@ -2055,7 +2862,6 @@ pre { margin: 0; background: #0b0d12; border: 1px solid var(--border); border-ra
     </div>
     <div class="row" style="margin-top: 12px;">
       <button id="extraJsonOff">关闭额外参数</button>
-      <button id="extraJsonAws" class="primary">OpenRouter AWS 锁定</button>
       <button id="extraJsonFormat">格式化 JSON</button>
       <button id="extraJsonApply" class="primary">应用</button>
     </div>
@@ -2201,7 +3007,6 @@ document.getElementById('prefixLockOn').onclick = async () => { await api('/cons
 document.getElementById('prefixLockOff').onclick = async () => { await api('/console/prefix-lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); await refreshAll(); setStatus('强制 Prefix 锁定已关闭'); };
 document.getElementById('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('已清空锁定 prefix，开启状态下下一次请求会重新学习'); };
 document.getElementById('extraJsonOff').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: {} }) }); await refreshAll(); setStatus('上游额外 JSON 已关闭'); };
-document.getElementById('extraJsonAws').onclick = async () => { document.getElementById('upstreamExtraJson').value = JSON.stringify({ provider: { order: ['Amazon Bedrock'], allow_fallbacks: false } }, null, 2); await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ json: document.getElementById('upstreamExtraJson').value }) }); await refreshAll(); setStatus('OpenRouter AWS 锁定参数已应用。记得上游格式要切到 OpenAI-compatible。'); };
 document.getElementById('extraJsonFormat').onclick = () => { document.getElementById('upstreamExtraJson').value = JSON.stringify(JSON.parse(document.getElementById('upstreamExtraJson').value || '{}'), null, 2); setStatus('额外 JSON 已格式化'); };
 document.getElementById('extraJsonApply').onclick = async () => { await api('/console/upstream-extra-json', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ json: document.getElementById('upstreamExtraJson').value }) }); await refreshAll(); setStatus('上游额外 JSON 已应用'); };
 document.getElementById('refresh').onclick = async () => { await refreshAll(); setStatus('已刷新'); };
@@ -2221,7 +3026,15 @@ async function handleRequest(request) {
 
     try {
         if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/console')) {
-            return htmlResponse(getConsoleHtml());
+            return consoleResponse();
+        }
+
+        if (request.method === 'GET' && url.pathname === '/console.css') {
+            return staticTextResponse('./public/console.css', 'text/css; charset=utf-8');
+        }
+
+        if (request.method === 'GET' && url.pathname === '/console.js') {
+            return staticTextResponse('./public/console.js', 'application/javascript; charset=utf-8');
         }
 
         if (url.pathname.startsWith('/console/')) {

@@ -1,32 +1,145 @@
-# ST Claude Cache Gateway
+# ST Claude Cache Gateway 使用指南
 
-Local gateway for SillyTavern. It converts `[[CACHE_BREAK]]` markers into Claude prompt-cache `cache_control` blocks immediately before forwarding requests to an upstream provider such as Pioneer.
+ST Claude Cache Gateway 是一个面向 SillyTavern / 酒馆的本地 Claude 缓存网关。它接收 OpenAI-compatible 聊天补全请求，在发送给上游前处理 `[[CACHE_BREAK]]`、Claude prompt cache、Prefix 锁定、渠道 Profile 和高级参数。
 
-This route keeps SillyTavern's normal send flow intact, so memory/world-info/regex/prompt plugins can finish their normal interception before the final request reaches this gateway.
+默认监听：
 
-## Features
+```text
+http://127.0.0.1:8788
+```
 
-- `POST /v1/chat/completions` accepts SillyTavern/OpenAI-compatible chat completions after converting markers.
-- Claude/Anthropic-compatible inbound (`POST /v1/messages`) is intentionally disabled because SillyTavern Claude-compatible requests may repeatedly rewrite cache.
-- Defaults to Anthropic native `/v1/messages` upstream mode for Claude cache compatibility after receiving OpenAI-compatible inbound requests.
-- Can switch back to OpenAI-compatible upstream mode with `UPSTREAM_MODE=openai` or the debug console.
-- Supports optional upstream extra JSON body parameters for OpenRouter/provider routing tests.
-- `GET /v1/models` forwards model listing.
-- `GET /health` checks the gateway.
-- Supports streaming by piping the upstream response body.
-- Defaults to Claude native 1-hour cache TTL.
-- Works on PC and Android Termux with Node.js 18+.
-- No dependencies.
+酒馆 / 客户端推荐填写：
 
-## How marker conversion works
+```text
+Base URL: http://127.0.0.1:8788/v1
+API Key: 你的上游供应商 API Key
+```
 
-Put this marker after large stable prompt content:
+> 不要把 API Key 写进渠道 Profile 或高级配置。Key 应放在客户端请求头，或仅在可信本机环境里通过 `UPSTREAM_API_KEY` 环境变量传入。
+
+## 功能概览
+
+- 接收 OpenAI-compatible `POST /v1/chat/completions` 请求。
+- 默认把客户端请求转换为 Anthropic native `/v1/messages` 上游格式，以便使用 Claude prompt cache。
+- 支持 `[[CACHE_BREAK]]` 手动缓存标记。
+- 支持 Claude `cache_control` 注入，最多 4 个缓存断点。
+- 支持 1 小时缓存 TTL 或供应商默认缓存窗口。
+- 支持首页“缓存转译”总开关。
+- 支持 Prefix 锁定，降低前缀漂移导致的缓存不命中。
+- 支持多渠道 Profile：Pioneer、OpenRouter、Anthropic、Vertex、Bedrock、自定义渠道。
+- 支持 OpenRouter 供应商锁定和自定义供应商名。
+- 支持高级配置：包含 / 排除主体参数，包含 / 排除请求头。
+- 支持内存诊断日志，不持久化私密请求记录。
+- 默认只绑定 `127.0.0.1`，适合本机使用。
+
+## 安装与启动
+
+需要 Node.js 18 或更新版本。
+
+### Windows
+
+可以双击：
+
+```text
+start-gateway.bat
+```
+
+也可以在终端运行：
+
+```powershell
+git clone https://github.com/shanye5593/ST-ClaudeCacheGateway.git
+cd ST-ClaudeCacheGateway
+npm start
+```
+
+### macOS / Linux
+
+`.bat` 只适用于 Windows，macOS / Linux 不要运行它。
+
+```sh
+git clone https://github.com/shanye5593/ST-ClaudeCacheGateway.git
+cd ST-ClaudeCacheGateway
+chmod +x start-gateway.sh
+./start-gateway.sh
+```
+
+也可以直接运行：
+
+```sh
+npm start
+```
+
+### Termux / Android
+
+```sh
+pkg update
+pkg install git nodejs-lts
+git clone https://github.com/shanye5593/ST-ClaudeCacheGateway.git
+cd ST-ClaudeCacheGateway
+npm start
+```
+
+如果 SillyTavern 和网关在同一台 Android / Termux 设备上：
+
+```text
+Base URL: http://127.0.0.1:8788/v1
+```
+
+如果其它设备要访问这台手机上的网关，需要在可信局域网中启动：
+
+```sh
+HOST=0.0.0.0 npm start
+```
+
+然后客户端填写：
+
+```text
+Base URL: http://手机局域网IP:8788/v1
+```
+
+只建议在可信私有网络中使用 `HOST=0.0.0.0`。任何能访问网关的人，只要有 API Key，或你设置了 `UPSTREAM_API_KEY`，就可能通过它发起请求。
+
+## 控制台
+
+启动后打开：
+
+```text
+http://127.0.0.1:8788/console
+```
+
+控制台包含：
+
+- 网关概览：当前渠道、缓存转译、上游格式、TTL、Prefix 状态。
+- 渠道配置：切换 / 保存渠道 Profile。
+- 缓存策略：查看缓存标记、切换 TTL、管理 Prefix 锁定。
+- 请求日志：临时打开诊断、查看最终请求体和缓存结果。
+- 高级配置：处理主体参数和请求头。
+
+## 客户端接入
+
+推荐在 SillyTavern / 酒馆里使用 OpenAI-compatible / Chat Completion 接入方式。
+
+```text
+Base URL: http://127.0.0.1:8788/v1
+API Key: 你的上游供应商 API Key
+Model: 你的上游模型名
+```
+
+不要使用酒馆的 Claude / Anthropic-compatible 入站模式连接这个网关。当前网关的 Claude 入站 `POST /v1/messages` 是故意禁用的，因为酒馆 Claude-compatible 请求在测试中可能反复改写缓存结构。推荐路径是：
+
+```text
+酒馆 OpenAI-compatible 请求 -> 本地网关 -> Anthropic native 或 OpenAI-compatible 上游
+```
+
+## 缓存标记 `[[CACHE_BREAK]]`
+
+把下面的标记放在大段稳定内容之后：
 
 ```text
 [[CACHE_BREAK]]
 ```
 
-The gateway removes the marker and adds this by default:
+网关会在发送上游前移除这个标记，并在对应位置注入 Claude prompt cache：
 
 ```json
 {
@@ -37,188 +150,347 @@ The gateway removes the marker and adds this by default:
 }
 ```
 
-Claude supports up to 4 cache breakpoints per request. Extra markers are removed without cache control.
+适合放在缓存标记之前：
 
-The default cache TTL is now `1h` because the gateway defaults to Anthropic native `/v1/messages` upstream mode. If you need the provider default ephemeral window instead, use `CACHE_TTL=default` or switch it in the debug console.
+- 系统提示词
+- 角色卡
+- 蓝灯世界书 / 蓝灯 World Info
+- 长篇固定设定
+- 固定规则和格式要求
 
-## PC quick start
+适合放在缓存标记之后：
 
-```powershell
-git clone https://github.com/shanye5593/ST-ClaudeCacheGateway.git
-cd ST-ClaudeCacheGateway
-npm start
-```
+- 绿灯世界书 / 绿灯 World Info
+- 最近聊天记录
+- 当前用户输入
+- 短期记忆
+- 会频繁变化的上下文
 
-By default it listens on:
+简单理解：蓝灯世界书放在 `[[CACHE_BREAK]]` 前面，绿灯世界书放在 `[[CACHE_BREAK]]` 后面。
 
-```text
-http://127.0.0.1:8789
-```
+Claude 每个请求最多支持 4 个缓存断点。超过 4 个时，多余标记会被移除，但不会注入 `cache_control`。
 
-and forwards to:
+## Prefix 锁定 / 强制锁定
 
-```text
-https://api.pioneer.ai
-```
+Prefix 锁定是给“缓存点前面的内容不够稳定”准备的保护功能。它不是必须开启的功能；如果你的缓存点前内容本来就稳定，可以先不开。
 
-Recommended SillyTavern setup: use OpenAI-compatible / Chat Completion settings, while keeping this gateway's upstream format as Anthropic native in the console.
+它解决的问题是“前缀漂移”：有些酒馆配置、插件、世界书、正则、数据库填表内容或动态注入内容，可能会在 `[[CACHE_BREAK]]` 之前插入变化内容。只要缓存点之前有细微变化，Claude 看到的稳定前缀就不再完全一致，缓存命中率就会下降。
 
-```text
-Base URL: http://127.0.0.1:8789
-API Key:  your Pioneer API key
-Model:    your Pioneer model name
-```
+开启后：
 
-Do not use SillyTavern Claude/Anthropic-compatible settings with this gateway. That inbound route is disabled because it may repeatedly rewrite cache in SillyTavern tests.
+1. 第一个带缓存点的最终请求会教会网关“稳定前缀”。
+2. 网关会记录从请求开头到第一个 `cache_control` 为止的内容。
+3. 后续请求会丢弃当前请求里的缓存点前缀，强制替换为已经学习到的稳定前缀。
+4. 缓存点之后的内容仍使用当前请求的新内容，例如近期聊天、当前输入、绿灯世界书等。
 
-## Termux quick start
+这是一种替换，不是追加，所以不会把世界书、系统提示词或角色卡重复拼接。
 
-```sh
-pkg update
-pkg install git nodejs-lts
-git clone https://github.com/shanye5593/ST-ClaudeCacheGateway.git
-cd ST-ClaudeCacheGateway
-npm start
-```
+适合开启 Prefix 锁定的情况：
 
-If SillyTavern runs on the same Termux/Android device, use:
+- 你已经正确放置了 `[[CACHE_BREAK]]`，但缓存仍然不稳定。
+- 怀疑世界书、正则、插件、数据库填表在缓存点前产生了动态变化。
+- 想临时验证缓存不命中是否由前缀漂移造成。
 
-```text
-Base URL: http://127.0.0.1:8789
-```
+不建议长期无脑开启的情况：
 
-If another device needs to connect to the Termux phone, bind to all interfaces:
+- 你经常切换角色卡、世界书或预设。
+- 你希望缓存点之前的内容每轮都能自然更新。
+- 你还没有确认哪些内容应该放在缓存点前、哪些应该放在缓存点后。
 
-```sh
-HOST=0.0.0.0 npm start
-```
+更换以下内容后，请清空并重新学习 Prefix：
 
-Then use the phone's LAN IP in SillyTavern:
+- 角色卡
+- 世界书
+- 预设
+- 主要系统提示词
+- 任何应该位于缓存标记之前的内容
 
-```text
-Base URL: http://PHONE_LAN_IP:8789
-```
+如果关闭首页“缓存转译”，Prefix 锁定也会跳过，不会参与请求处理。
 
-Only do this on a trusted private network. Anyone who can reach the gateway can send requests through it if they also have an API key or if `UPSTREAM_API_KEY` is set.
+## 缓存转译总开关
 
-## Configuration
+首页的“缓存转译”是总开关。
 
-Environment variables:
+开启时：
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `HOST` | `127.0.0.1` | Listen host. Use `0.0.0.0` for LAN access. |
-| `PORT` | `8789` | Listen port. |
-| `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | Upstream provider root, `/v1`, or full endpoint. |
-| `UPSTREAM_MODE` | `anthropic` | Upstream request format. `anthropic` converts chat completions to Claude native `/v1/messages`; `openai` forwards to `/v1/chat/completions`. |
-| `UPSTREAM_EXTRA_JSON` | `{}` | Optional JSON object merged into OpenAI-compatible upstream request bodies, useful for OpenRouter provider routing parameters. |
-| `UPSTREAM_API_KEY` | empty | Optional fallback API key if the client does not send `Authorization`. |
-| `CACHE_TTL` | `1h` | Cache lifetime. `1h` sends Anthropic's 1-hour TTL; empty/default/none/provider-default omits `ttl`. |
+- 网关识别 `[[CACHE_BREAK]]`。
+- 网关注入 `cache_control`。
+- Prefix 锁定可以参与请求处理。
 
-Examples:
+关闭时：
 
-```sh
-UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8789 npm start
-```
+- 网关不处理 `[[CACHE_BREAK]]`。
+- 网关不注入 `cache_control`。
+- Prefix 锁定会跳过。
+- 高级配置仍然生效。
+- 渠道 Profile 和上游格式转换仍然生效。
 
-Use OpenAI-compatible upstream mode if your provider/model does not support Claude native `/v1/messages`:
+如果你只是想临时绕过缓存处理，但仍想保留渠道、高级参数、请求头规则，可以关闭“缓存转译”。
 
-```sh
-UPSTREAM_MODE=openai npm start
-```
+## 缓存 TTL
 
-OpenRouter AWS supplier test example:
+缓存策略页可以切换 TTL：
 
-```powershell
-$env:UPSTREAM_BASE_URL = 'https://openrouter.ai/api/v1'
-$env:UPSTREAM_MODE = 'openai'
-$env:UPSTREAM_API_KEY = 'sk-or-v1-...'
-npm start
-```
+- `1 小时`：发送 Claude 原生 1 小时缓存窗口：`ttl: "1h"`。
+- `默认窗口`：不发送 `ttl`，交给上游供应商默认 ephemeral 缓存窗口处理。
 
-Then open the console, apply the `OpenRouter AWS 锁定` preset, enable diagnostics, and confirm the selected diagnostic JSON contains:
+如果上游或模型不支持 1 小时 TTL，请切回默认窗口。
 
-```json
-"provider": {
-  "order": ["Amazon Bedrock"],
-  "allow_fallbacks": false
-}
-```
-
-The returned-provider display is best-effort. Some upstreams return provider information in headers/body; if OpenRouter does not return it, the gateway will show `unknown/not returned`, but the final upstream request body still proves whether the provider lock was sent.
-
-Note: Claude/Anthropic-compatible inbound `POST /v1/messages` and `POST /v1/messages/count_tokens` are disabled. Use OpenAI-compatible inbound `POST /v1/chat/completions`; it can use either upstream mode, with Anthropic native recommended for Claude cache.
-
-Use provider-default cache TTL if your upstream/model does not support `1h`:
+也可以用环境变量启动：
 
 ```sh
 CACHE_TTL=default npm start
 ```
 
+## 渠道 Profile
+
+渠道 Profile 会持久化到本地 `gateway-settings.json`，保存：
+
+- 渠道名称
+- Base URL
+- 上游格式
+- 高级主体参数
+- 高级请求头规则
+
+不会保存 API Key。
+
+默认渠道：
+
+- Pioneer：默认自定义渠道，默认连接 `https://api.pioneer.ai`。
+- OpenRouter：内置模板，默认 `https://openrouter.ai/api/v1`，上游格式通常用 OpenAI-compatible。
+- Anthropic：内置模板。
+- Google Vertex AI：内置模板。
+- Amazon Bedrock：内置模板。
+- 自定义渠道：可以新建、重命名、保存、删除。
+
+注意：Vertex 和 Bedrock 卡片目前是 Profile 模板，不包含 Google Auth 或 AWS SigV4 签名。如果你需要真实云厂商鉴权，建议先通过兼容供应商、自定义代理或后续专门实现的鉴权层接入。
+
+## OpenRouter 供应商锁定
+
+OpenRouter 渠道支持“锁定供应商”。它会把 provider 参数写入请求体，例如锁定 Amazon Bedrock：
+
+```json
+{
+  "provider": {
+    "order": ["Amazon Bedrock"],
+    "allow_fallbacks": false
+  }
+}
+```
+
+控制台里可以：
+
+- 选择常见供应商。
+- 选择“自定义”后输入任意 OpenRouter 支持的供应商名。
+- 关闭锁定，恢复不指定 provider。
+
+如果 OpenRouter 没有在响应体或响应头返回实际供应商，诊断页可能显示 unknown；这不代表锁定没发送。以最终请求体里的 provider 字段为准。
+
+## 高级配置
+
+高级配置按当前渠道 Profile 保存。
+
+### 包含主体参数
+
+填写 JSON 对象，网关会把它深度合并进最终请求体。
+
+示例：
+
+```json
+{
+  "provider": {
+    "order": ["Amazon Bedrock"],
+    "allow_fallbacks": false
+  }
+}
+```
+
+这个功能只在 OpenAI-compatible 上游格式生效。Anthropic native 上游格式不会合并这些 OpenAI 请求体参数。
+
+### 排除主体参数
+
+一行一个字段路径，发送上游前删除对应字段。
+
+示例：
+
+```text
+stream_options
+metadata.trace_id
+provider.allow_fallbacks
+```
+
+适合用于删除某些供应商不接受的请求体字段。
+
+### 包含请求头
+
+填写 JSON 对象，网关会添加或覆写非密钥请求头。
+
+示例：
+
+```json
+{
+  "HTTP-Referer": "https://example.com",
+  "X-Title": "ST Claude Cache Gateway"
+}
+```
+
+不允许保存密钥或协议敏感 header，例如：
+
+- `authorization`
+- `x-api-key`
+- `cookie`
+- `set-cookie`
+- `host`
+- `content-length`
+- 包含 `token` / `secret` / `password` 的 header
+
+### 排除请求头
+
+一行一个 header 名，发送上游前删除。
+
+示例：
+
+```text
+x-real-ip
+x-forwarded-for
+```
+
+这可以用于删除某些代理、客户端或平台自动附带但你不想发给上游的 header。
+
+## 请求诊断
+
+请求诊断默认关闭，每次启动都是关闭状态。
+
+开启后，网关会在内存里保存最近请求记录，用于查看：
+
+- 最终发给上游的请求体
+- 请求头摘要
+- 缓存断点位置
+- Prefix hash / suffix hash
+- 上游状态码
+- 上游返回的缓存 read / creation token 用量
+
+诊断记录可能包含私密提示词、聊天内容、世界书内容。不要公开分享导出的诊断 JSON。诊断数据只保存在内存中，重启后清空。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | 监听地址。局域网访问才使用 `0.0.0.0`。 |
+| `PORT` | `8788` | 监听端口。 |
+| `UPSTREAM_BASE_URL` | `https://api.pioneer.ai` | 启动时的上游地址默认 / 覆盖。 |
+| `UPSTREAM_MODE` | `anthropic` | 上游格式：`anthropic` 或 `openai`。 |
+| `UPSTREAM_EXTRA_JSON` | `{}` | 启动时包含主体参数。 |
+| `UPSTREAM_EXCLUDE_PATHS` | 空 | 启动时排除主体参数，逗号或换行分隔。 |
+| `UPSTREAM_HEADERS` | `{}` | 启动时包含请求头。不要写密钥。 |
+| `UPSTREAM_EXCLUDE_HEADERS` | 空 | 启动时排除请求头，逗号或换行分隔。 |
+| `UPSTREAM_API_KEY` | 空 | 当客户端没有传 API Key 时的 fallback。仅建议私有环境使用。 |
+| `CACHE_TTL` | `1h` | `1h` 或 `default`。 |
+| `CACHE_TRANSLATION_ENABLED` | `true` | 是否启用缓存转译。 |
+
+示例：
+
+```sh
+UPSTREAM_BASE_URL=https://api.pioneer.ai PORT=8788 npm start
+```
+
+OpenAI-compatible 上游：
+
+```sh
+UPSTREAM_MODE=openai npm start
+```
+
+关闭缓存转译：
+
+```sh
+CACHE_TRANSLATION_ENABLED=false npm start
+```
+
+PowerShell 示例：
+
 ```powershell
 $env:UPSTREAM_BASE_URL = 'https://api.pioneer.ai'
-$env:PORT = '8789'
-# Optional: omit ttl and use provider default cache lifetime
-# $env:CACHE_TTL = 'default'
+$env:PORT = '8788'
+$env:CACHE_TTL = 'default'
 npm start
 ```
 
-## Debug console
-
-Open the local console in a browser:
-
-```text
-http://127.0.0.1:8789/console
-```
-
-The console can:
-
-- switch cache TTL between `1h` and provider default without restarting the gateway;
-- switch upstream request format between Anthropic native and OpenAI-compatible without restarting the gateway;
-- remember the last selected TTL/upstream mode after restart in local `gateway-settings.json`;
-- show current runtime state;
-- enable diagnostics and store the latest request records in memory;
-- record the exact final upstream request body that the gateway sends, including model/system/messages/tools/thinking and other parameters;
-- summarize cache-control path, prefix hash, suffix hash, response status, and cache read/write token usage when the upstream returns usage fields;
-- enable memory-only Force Prefix Lock;
-- apply OpenRouter/provider extra JSON parameters and show best-effort returned provider information when the upstream exposes it;
-- download a diagnostic JSON file for debugging.
-
-Diagnostic records can include private prompts. Diagnostics are always off when the gateway starts. API-key headers are redacted, but request bodies are intentionally kept intact for cache debugging.
-
-## Force Prefix Lock
-
-Force Prefix Lock is an optional safety feature for unstable or incorrectly placed cache prefixes. It is off by default and only stored in memory.
-
-When enabled:
-
-1. The first final upstream request that contains a `cache_control` block teaches the gateway the locked prefix from the beginning of the prompt through the first `cache_control`.
-2. Later requests discard their current prefix and send the locked prefix plus the current suffix after the first `cache_control`.
-3. This is replacement, not append, so the same world-info/system prompt is not duplicated.
-
-Clear the lock after changing character cards, world-info, presets, chats, or any content that should live before the cache marker. Dynamic memory should be placed after `[[CACHE_BREAK]]` if you want it to keep changing.
-
-## Health check
+## 健康检查
 
 ```sh
-curl http://127.0.0.1:8789/health
+curl http://127.0.0.1:8788/health
 ```
 
-Expected response:
+示例响应：
 
 ```json
 {
   "ok": true,
   "host": "127.0.0.1",
-  "port": 8789,
+  "port": 8788,
   "upstreamBaseUrl": "https://api.pioneer.ai",
   "upstreamMode": "anthropic",
   "cacheTtl": "1h"
 }
 ```
 
-## Notes
+## 常见问题
 
-- Do not publish logs or exported requests that contain private prompts or API keys.
-- Prefer passing the API key from SillyTavern. Use `UPSTREAM_API_KEY` only on a private machine/network.
-- Keep stable content before `[[CACHE_BREAK]]`; dynamic content before the marker reduces cache hits.
+### macOS 打不开 `start-gateway.bat`
+
+`.bat` 是 Windows 批处理文件。macOS / Linux 请用：
+
+```sh
+chmod +x start-gateway.sh
+./start-gateway.sh
+```
+
+或直接运行：
+
+```sh
+npm start
+```
+
+### 酒馆请求 404 或路径不对
+
+优先把 Base URL 填完整：
+
+```text
+http://127.0.0.1:8788/v1
+```
+
+### 缓存不命中
+
+检查：
+
+- 稳定内容是否都在 `[[CACHE_BREAK]]` 之前。
+- 蓝灯世界书是否在 `[[CACHE_BREAK]]` 之前，绿灯世界书是否在 `[[CACHE_BREAK]]` 之后。
+- 最近聊天和当前输入是否在 `[[CACHE_BREAK]]` 之后。
+- 是否有世界书、正则、插件在缓存点之前插入动态内容。
+- 必要时开启 Prefix 锁定测试是否是前缀漂移。
+
+### 使用数据库会影响缓存吗？
+
+使用数据库本身不影响缓存。官方渠道验证正常；如果出现数据库相关异常，通常是第三方实现或接入方式的问题。
+
+需要注意的是：如果数据库的蓝灯条目会随着填表内容更新，它就不再是稳定前缀。此时应把全局注入位置改到缓存点后面，例如“角色后”或“系统”这类位于缓存点后的注入位置，避免它在缓存点前变化导致缓存失效。
+
+### 上游报不支持 `ttl: 1h`
+
+到“缓存策略”把 TTL 切换为默认窗口，或启动时使用：
+
+```sh
+CACHE_TTL=default npm start
+```
+
+### 可以把 Key 保存到 Profile 吗？
+
+不建议，也不允许。网关会拒绝明显密钥字段。请让客户端发送 API Key，或仅在私有本机环境下使用 `UPSTREAM_API_KEY`。
+
+## 安全注意事项
+
+- 不要公开诊断 JSON、请求日志、聊天导出、世界书内容。
+- 不要把 API Key 写进 README、Profile、高级配置或截图。
+- `gateway-settings.json` 是本地运行配置，不应该提交到公开仓库。
+- 默认绑定 `127.0.0.1`；只有可信局域网才使用 `HOST=0.0.0.0`。
+- 请求诊断每次启动默认关闭，避免意外记录私密内容。

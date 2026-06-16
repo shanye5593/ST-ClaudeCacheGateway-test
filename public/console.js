@@ -1,0 +1,990 @@
+const state = {
+  runtime: null,
+  requests: [],
+  selected: null,
+  selectedTab: 'body',
+  page: 1,
+  pageSize: 20,
+  filters: {
+    cache: '',
+  },
+  channelDrafts: [],
+};
+
+const pages = {
+  dashboard: '网关概览',
+  channels: '渠道配置',
+  cache: '缓存策略',
+  logs: '请求日志',
+  advanced: '高级配置',
+};
+
+let customChannelSeq = 0;
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    throw new Error(formatApiError(await response.text()));
+  }
+  return response.json();
+}
+
+function formatApiError(raw) {
+  let message = raw || '请求失败。';
+  try {
+    const parsed = JSON.parse(raw);
+    message = parsed?.error || parsed?.message || message;
+  } catch {
+    // Keep the raw response text when the server did not return JSON.
+  }
+
+  const zh = {
+    'Channel base URL is required.': '上游 URL 不能为空，请填写完整的 http/https 地址。',
+    'Channel base URL is too long.': '上游 URL 太长，请检查后再保存。',
+    'Channel base URL must be an absolute URL.': '上游 URL 必须是完整地址，例如 https://example.com/api/v1。',
+    'Channel base URL must use http or https.': '上游 URL 只支持 http 或 https。',
+    'Channel base URL must not include username or password.': '上游 URL 不能包含用户名或密码。',
+    'Channel name must be 1-80 characters.': '渠道名称需要填写 1-80 个字符。',
+    'Built-in channels cannot be deleted.': '内置渠道不能删除。',
+    'Channel not found.': '渠道不存在，可能已被删除，请刷新后重试。',
+    'Upstream exclude path is too long.': '排除参数路径太长，请检查后再保存。',
+    'Too many upstream exclude paths.': '排除参数太多，请减少后再保存。',
+    'Upstream headers must be a JSON object.': '请求头覆写必须是 JSON 对象。',
+    'Upstream exclude header name is too long.': '排除请求头名称太长，请检查后再保存。',
+    'Too many upstream exclude headers.': '排除请求头太多，请减少后再保存。',
+  };
+  if (message.startsWith('Invalid upstream header name:')) {
+    return `请求头名称格式不正确：${message.replace('Invalid upstream header name:', '').trim()}`;
+  }
+  if (message.startsWith('Do not store secrets or protocol headers in channel profiles:')) {
+    return `不能在 Profile 中保存密钥或协议请求头：${message.replace('Do not store secrets or protocol headers in channel profiles:', '').trim()}`;
+  }
+  if (message.startsWith('Upstream header value must be')) {
+    return `请求头值只支持字符串、数字或布尔值。`;
+  }
+  if (message.startsWith('Invalid upstream header value:')) {
+    return `请求头值格式不正确：${message.replace('Invalid upstream header value:', '').trim()}`;
+  }
+  if (message.startsWith('Invalid upstream exclude path:')) {
+    return `排除参数路径格式不正确：${message.replace('Invalid upstream exclude path:', '').trim()}`;
+  }
+
+  return zh[message] || message;
+}
+
+function postJson(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function text(value, fallback = '-') {
+  return value === null || value === undefined || value === '' ? fallback : String(value);
+}
+
+function ttlLabel(value) {
+  return value === '1h' ? '1 小时' : '5 分钟';
+}
+
+function upstreamModeLabel(value) {
+  return value === 'anthropic' ? 'Anthropic native' : 'OpenAI-compatible';
+}
+
+function cacheResultLabel(value) {
+  if (value === 'hit') return 'HIT';
+  if (value === 'creation') return 'WRITE';
+  if (value === 'none') return 'NONE';
+  return 'UNKNOWN';
+}
+
+function cacheClass(value, status) {
+  if (status && status >= 400) return 'cache-error';
+  if (value === 'hit') return 'cache-hit';
+  if (value === 'creation') return 'cache-creation';
+  if (value === 'none') return 'cache-none';
+  return 'cache-unknown';
+}
+
+function tokenLabel(value) {
+  return value === null || value === undefined ? '-' : value;
+}
+
+function providerLabel(item) {
+  return item?.upstreamProvider ? String(item.upstreamProvider) : 'unknown';
+}
+
+function compactHash(value) {
+  return value ? String(value).slice(0, 10) : '-';
+}
+
+function timeLabel(value) {
+  if (!value) return '-';
+  return new Date(value).toLocaleTimeString();
+}
+
+function downloadJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function setStatus(message) {
+  const hint = $('selectedHint');
+  if (hint) hint.textContent = message;
+}
+
+function clearNode(root) {
+  root.replaceChildren();
+}
+
+function appendText(parent, tag, value, className) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  el.textContent = text(value);
+  parent.appendChild(el);
+  return el;
+}
+
+function renderKv(root, entries) {
+  clearNode(root);
+  for (const [key, value, options = {}] of entries) {
+    const row = document.createElement('div');
+    row.className = 'kv';
+    appendText(row, 'span', key);
+    const v = document.createElement('span');
+    if (options.mono) v.className = 'kv-mono';
+    if (options.link && value) {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.className = 'kv-mono prefix-link';
+      a.textContent = String(value);
+      a.onclick = options.link;
+      v.appendChild(a);
+    } else {
+      v.textContent = text(value);
+    }
+    row.appendChild(v);
+    root.appendChild(row);
+  }
+}
+
+function setDrawerOpen(id, open) {
+  const drawer = $(id);
+  if (!drawer) return;
+  drawer.classList.toggle('open', open);
+  drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function switchPage(page) {
+  for (const item of document.querySelectorAll('.nav-item')) {
+    item.classList.toggle('active', item.dataset.page === page);
+  }
+  for (const item of document.querySelectorAll('.page')) {
+    item.classList.toggle('active', item.id === `page-${page}`);
+  }
+  $('pageTitle').textContent = pages[page] || page;
+  if (page === 'logs') renderRequests();
+}
+
+function channelName(runtime) {
+  if (!runtime) return '加载中';
+  if (runtime.activeChannel?.name) return runtime.activeChannel.name;
+  if (runtime.upstreamBaseUrl.includes('openrouter.ai')) return 'OpenRouter';
+  if (runtime.upstreamBaseUrl.includes('anthropic.com')) return 'Anthropic';
+  if (runtime.upstreamBaseUrl.includes('bedrock')) return 'Amazon Bedrock';
+  if (runtime.upstreamBaseUrl.includes('googleapis.com')) return 'Google Vertex';
+  return 'Custom/当前供应商';
+}
+
+function providerFromExtraJson(extraJson) {
+  const order = extraJson?.provider?.order;
+  return Array.isArray(order) && order.length ? String(order[0]) : '';
+}
+
+function providerExtraJson(provider) {
+  const normalized = typeof provider === 'string' ? provider.trim() : '';
+  return normalized ? { provider: { order: [normalized], allow_fallbacks: false } } : {};
+}
+
+function readOpenRouterProvider(card) {
+  const provider = card.querySelector('[data-channel-provider]')?.value || '';
+  if (provider === '__custom') {
+    return card.querySelector('[data-channel-provider-custom]')?.value.trim() || '';
+  }
+  return provider;
+}
+
+function getProfileById(id) {
+  return state.runtime?.channels?.find((profile) => profile.id === id) || null;
+}
+
+function renderTopbar() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  $('topChannel').textContent = `渠道：${channelName(runtime)}`;
+  $('topCapture').textContent = `诊断：${runtime.captureRequests ? '开启' : '关闭'} / ${runtime.capturedRequests}`;
+  $('topPrefix').textContent = `强制锁定：${runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '学习中' : '关闭'}`;
+}
+
+function setSegActive(rootId, value) {
+  const root = $(rootId);
+  if (!root) return;
+  for (const button of root.querySelectorAll('button')) {
+    button.classList.toggle('active', button.dataset.ttl === value);
+  }
+}
+
+function renderCaptureControls() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+
+  $('mockCaptureState').textContent = runtime.captureRequests ? '已开启' : '已关闭';
+  $('mockCaptureState').style.color = runtime.captureRequests ? 'var(--text-main)' : 'var(--text-muted)';
+  $('quickCaptureSwitch').checked = Boolean(runtime.captureRequests);
+  $('logsCaptureState').textContent = runtime.captureRequests ? '已开启' : '已关闭';
+  $('logsCaptureState').style.color = runtime.captureRequests ? 'var(--text-main)' : 'var(--text-muted)';
+  $('logsCaptureSwitch').checked = Boolean(runtime.captureRequests);
+}
+
+function renderDashboard() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  const latestProvider = state.requests.find((item) => item.upstreamProvider)?.upstreamProvider;
+
+  $('sidebarAddress').textContent = `${runtime.host}:${runtime.port}`;
+  $('statCacheTranslation').textContent = runtime.cacheTranslationEnabled ? '开启' : '关闭';
+  $('cacheTranslationSwitch').checked = Boolean(runtime.cacheTranslationEnabled);
+  $('statUpstreamMode').textContent = upstreamModeLabel(runtime.upstreamMode);
+  $('statUpstreamUrl').textContent = runtime.upstreamBaseUrl;
+  $('statTtl').textContent = ttlLabel(runtime.cacheTtl);
+  $('statPrefixHash').textContent = compactHash(runtime.prefixLockHash);
+  $('statPrefixDetail').textContent = runtime.prefixLockActive ? `${runtime.prefixLockReplacements || 0} 次替换 · ${runtime.prefixLockFirstCacheControlPath || '-'}` : '尚未锁定';
+  renderCaptureControls();
+  $('mockLockState').textContent = runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '学习中' : '已关闭';
+  $('mockLockState').style.color = runtime.prefixLockEnabled ? 'var(--success)' : 'var(--text-muted)';
+  $('quickPrefixSwitch').checked = Boolean(runtime.prefixLockEnabled);
+  $('mockTtlState').textContent = ttlLabel(runtime.cacheTtl);
+  setSegActive('quickTtlSeg', runtime.cacheTtl === '1h' ? '1h' : '');
+
+  renderKv($('runtimeKv'), [
+    ['本地 URL', `http://${runtime.host}:${runtime.port}`, { mono: true }],
+    ['缓存转译', runtime.cacheTranslationEnabled ? '开启' : '关闭'],
+    ['上游连接', runtime.upstreamBaseUrl, { mono: true }],
+    ['上游格式', upstreamModeLabel(runtime.upstreamMode)],
+    ['当前供应商', latestProvider || channelName(runtime)],
+    ['最新 Prefix Hash', runtime.prefixLockHash || '-', { mono: true }],
+    ['额外 JSON 键', runtime.upstreamExtraJsonEnabled ? runtime.upstreamExtraJsonKeys.join(', ') : '关闭'],
+  ]);
+}
+
+function buildChannelPayload(card, profile) {
+  const provider = readOpenRouterProvider(card);
+  return {
+    name: profile.kind === 'builtin' ? profile.name : card.querySelector('[data-channel-name]')?.value,
+    baseUrl: card.querySelector('[data-channel-url]')?.value,
+    upstreamMode: card.querySelector('[data-channel-mode]')?.value,
+    upstreamExtraJson: profile.id === 'openrouter' ? providerExtraJson(provider) : profile.upstreamExtraJson || {},
+    upstreamExcludePaths: profile.upstreamExcludePaths || [],
+    upstreamHeaders: profile.upstreamHeaders || {},
+    upstreamExcludeHeaders: profile.upstreamExcludeHeaders || [],
+  };
+}
+
+async function saveChannelProfile(card, profile) {
+  const payload = buildChannelPayload(card, profile);
+  if (profile.isDraft) {
+    await postJson('/console/channels', payload);
+    state.channelDrafts = state.channelDrafts.filter((draft) => draft.id !== profile.id);
+  } else {
+    await postJson(`/console/channels/${encodeURIComponent(profile.id)}`, payload);
+  }
+  await refreshAll();
+  setStatus(`渠道已保存：${payload.name || profile.name}`);
+}
+
+async function activateChannelProfile(card, profile) {
+  const payload = buildChannelPayload(card, profile);
+  if (profile.isDraft) {
+    await postJson('/console/channels', payload);
+    state.channelDrafts = state.channelDrafts.filter((draft) => draft.id !== profile.id);
+    await refreshAll();
+    setStatus(`渠道已保存并启用：${payload.name || profile.name}`);
+    return;
+  }
+  await saveChannelProfile(card, profile);
+  await postJson(`/console/channels/${encodeURIComponent(profile.id)}/activate`, {});
+  await refreshAll();
+  setStatus(`当前渠道已切换为：${profile.name}`);
+}
+
+async function deleteChannelProfile(profile) {
+  if (profile.isDraft) {
+    state.channelDrafts = state.channelDrafts.filter((draft) => draft.id !== profile.id);
+    renderChannels();
+    setStatus(`已移除草稿渠道：${profile.name}`);
+    return;
+  }
+  await postJson(`/console/channels/${encodeURIComponent(profile.id)}/delete`, {});
+  await refreshAll();
+  setStatus(`已删除渠道：${profile.name}`);
+}
+
+function renderChannelCard(profile) {
+  const card = document.createElement('article');
+  card.className = `channel-card ${profile.id === state.runtime.activeChannelId ? 'active' : ''}`.trim();
+  card.dataset.channel = profile.id;
+
+  if (profile.kind !== 'builtin') {
+    const del = appendText(card, 'button', '×', 'card-del');
+    del.type = 'button';
+    del.title = '删除渠道';
+    del.setAttribute('aria-label', `删除渠道：${profile.name}`);
+    del.onclick = (event) => {
+      event.stopPropagation();
+      deleteChannelProfile(profile).catch((error) => setStatus(error.message));
+    };
+  }
+
+  const title = document.createElement('h3');
+  if (profile.kind === 'builtin') {
+    title.textContent = profile.name;
+  } else {
+    title.className = 'editable-title';
+    const nameButton = appendText(title, 'button', profile.name || '自定义渠道', 'name-display');
+    nameButton.type = 'button';
+    nameButton.title = '点击编辑渠道名称';
+    const nameInput = document.createElement('input');
+    nameInput.className = 'name-input';
+    nameInput.dataset.channelName = 'true';
+    nameInput.value = profile.name;
+    nameInput.placeholder = '渠道名称';
+    nameInput.hidden = true;
+
+    const finishNameEdit = () => {
+      const nextName = nameInput.value.trim() || profile.name || '自定义渠道';
+      nameInput.value = nextName;
+      nameButton.textContent = nextName;
+      nameInput.hidden = true;
+      nameButton.hidden = false;
+    };
+    const startNameEdit = () => {
+      nameButton.hidden = true;
+      nameInput.hidden = false;
+      nameInput.focus();
+      nameInput.select();
+    };
+
+    nameButton.onclick = startNameEdit;
+    nameInput.onblur = finishNameEdit;
+    nameInput.onkeydown = (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        nameInput.blur();
+      } else if (event.key === 'Escape') {
+        nameInput.value = nameButton.textContent;
+        nameInput.blur();
+      }
+    };
+
+    title.appendChild(nameButton);
+    title.appendChild(nameInput);
+  }
+  card.appendChild(title);
+
+  const form = document.createElement('div');
+  form.className = 'channel-form';
+  const row = document.createElement('div');
+  row.className = profile.id === 'openrouter' ? 'form-row' : '';
+
+  const urlLabel = document.createElement('label');
+  urlLabel.textContent = '上游 URL';
+  const urlInput = document.createElement('input');
+  urlInput.dataset.channelUrl = 'true';
+  urlInput.value = profile.baseUrl;
+  urlInput.placeholder = '';
+  urlLabel.appendChild(urlInput);
+  row.appendChild(urlLabel);
+
+  if (profile.id === 'openrouter') {
+    const providerLabelEl = document.createElement('label');
+    providerLabelEl.textContent = '锁定供应商';
+    const providerSelect = document.createElement('select');
+    providerSelect.dataset.channelProvider = 'true';
+    const currentProvider = providerFromExtraJson(profile.upstreamExtraJson);
+    const providerOptions = [
+      ['', '无（不锁定）'],
+      ['Amazon Bedrock', 'Amazon Bedrock'],
+      ['Google Vertex', 'Google Vertex'],
+      ['Anthropic', 'Anthropic'],
+      ['Google AI Studio', 'Google AI Studio'],
+    ];
+    const isKnownProvider = providerOptions.some(([value]) => value === currentProvider);
+    for (const [value, label] of providerOptions) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      providerSelect.appendChild(option);
+    }
+    const customOption = document.createElement('option');
+    customOption.value = '__custom';
+    customOption.textContent = '自定义供应商…';
+    providerSelect.appendChild(customOption);
+    providerSelect.value = isKnownProvider ? currentProvider : '__custom';
+    providerLabelEl.appendChild(providerSelect);
+    row.appendChild(providerLabelEl);
+
+    const customProviderLabel = document.createElement('label');
+    customProviderLabel.className = 'custom-provider-field';
+    customProviderLabel.textContent = '自定义供应商名称';
+    const customProviderInput = document.createElement('input');
+    customProviderInput.dataset.channelProviderCustom = 'true';
+    customProviderInput.placeholder = '例如 DeepInfra / Fireworks / Novita';
+    customProviderInput.value = isKnownProvider ? '' : currentProvider;
+    customProviderLabel.appendChild(customProviderInput);
+    customProviderLabel.hidden = providerSelect.value !== '__custom';
+    providerSelect.onchange = () => {
+      customProviderLabel.hidden = providerSelect.value !== '__custom';
+      if (!customProviderLabel.hidden) customProviderInput.focus();
+    };
+    form.appendChild(customProviderLabel);
+  }
+  form.appendChild(row);
+
+  const modeLabel = document.createElement('label');
+  modeLabel.textContent = '上游格式';
+  const modeSelect = document.createElement('select');
+  modeSelect.dataset.channelMode = 'true';
+  for (const [value, label] of [['anthropic', 'Anthropic native /v1/messages'], ['openai', 'OpenAI-compatible']]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    modeSelect.appendChild(option);
+  }
+  modeSelect.value = profile.upstreamMode;
+  modeLabel.appendChild(modeSelect);
+  form.appendChild(modeLabel);
+  card.appendChild(form);
+
+  const actions = document.createElement('div');
+  actions.className = 'channel-actions';
+  const activate = appendText(actions, 'button', profile.id === state.runtime.activeChannelId ? '已启用' : '启用渠道', profile.id === state.runtime.activeChannelId ? 'primary' : '');
+  activate.disabled = profile.id === state.runtime.activeChannelId;
+  activate.onclick = () => activateChannelProfile(card, profile).catch((error) => setStatus(error.message));
+  const save = appendText(actions, 'button', '保存配置', '');
+  save.onclick = () => saveChannelProfile(card, profile).catch((error) => setStatus(error.message));
+  card.appendChild(actions);
+
+  return card;
+}
+
+function renderAddChannelCard() {
+  const card = document.createElement('article');
+  card.className = 'channel-card add-card';
+  card.id = 'addChannelCard';
+  const plus = appendText(card, 'div', '+', 'add-plus');
+  plus.setAttribute('aria-hidden', 'true');
+  appendText(card, 'h3', '自定义渠道');
+  card.onclick = () => addCustomChannel().catch((error) => setStatus(error.message));
+  return card;
+}
+
+function renderChannels() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  const grid = $('channelGrid');
+  clearNode(grid);
+  for (const profile of runtime.channels || []) {
+    grid.appendChild(renderChannelCard(profile));
+  }
+  for (const profile of state.channelDrafts) {
+    grid.appendChild(renderChannelCard(profile));
+  }
+  grid.appendChild(renderAddChannelCard());
+  $('channelStateBadge').textContent = `${channelName(runtime)} · ${upstreamModeLabel(runtime.upstreamMode)}`;
+}
+
+function renderCache() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  setSegActive('cacheTtlSeg', runtime.cacheTtl === '1h' ? '1h' : '');
+  $('prefixLockSwitch').checked = runtime.prefixLockEnabled;
+  $('prefixLockBadge').textContent = runtime.prefixLockActive ? '已锁定' : runtime.prefixLockEnabled ? '等待学习' : '关闭';
+  $('prefixLockBadge').classList.toggle('off', !runtime.prefixLockEnabled);
+  renderKv($('prefixLockKv'), [
+    ['锁定前缀 ID', runtime.prefixLockHash, { link: openPrefixModal }],
+    ['缓存点路径', runtime.prefixLockFirstCacheControlPath, { mono: true }],
+    ['已替换次数', runtime.prefixLockReplacements],
+    ['最近动作', runtime.prefixLockLastAction],
+    ['跳过原因', runtime.prefixLockLastSkipReason],
+  ]);
+}
+
+function renderAdvanced() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  $('upstreamExtraJson').value = runtime.upstreamExtraJsonText || '{}';
+  $('upstreamExcludePaths').value = runtime.upstreamExcludePathsText || '';
+  $('upstreamHeaders').value = runtime.upstreamHeadersText || '{}';
+  $('upstreamExcludeHeaders').value = runtime.upstreamExcludeHeadersText || '';
+  const includeText = runtime.upstreamExtraJsonEnabled ? `包含 ${runtime.upstreamExtraJsonKeys.length}` : '包含 0';
+  const excludeText = runtime.upstreamExcludePathsEnabled ? `排除 ${runtime.upstreamExcludePaths.length}` : '排除 0';
+  $('extraJsonBadge').textContent = `${includeText} / ${excludeText}`;
+  $('extraJsonBadge').className = `badge ${runtime.upstreamExtraJsonEnabled || runtime.upstreamExcludePathsEnabled ? 'success' : ''}`;
+  const headerIncludeText = runtime.upstreamHeadersEnabled ? `包含 ${runtime.upstreamHeadersKeys.length}` : '包含 0';
+  const headerExcludeText = runtime.upstreamExcludeHeadersEnabled ? `排除 ${runtime.upstreamExcludeHeaders.length}` : '排除 0';
+  $('headerOverrideBadge').textContent = `${headerIncludeText} / ${headerExcludeText}`;
+  $('headerOverrideBadge').className = `badge ${runtime.upstreamHeadersEnabled || runtime.upstreamExcludeHeadersEnabled ? 'success' : ''}`;
+  $('cacheControl').textContent = JSON.stringify({
+    cacheTranslationEnabled: runtime.cacheTranslationEnabled,
+    upstreamMode: runtime.upstreamMode,
+    upstreamBaseUrl: runtime.upstreamBaseUrl,
+    cacheControl: runtime.cacheControl,
+    anthropicInboundEnabled: runtime.anthropicInboundEnabled,
+    prefixLock: {
+      enabled: runtime.prefixLockEnabled,
+      active: runtime.prefixLockActive,
+      hash: runtime.prefixLockHash,
+      action: runtime.prefixLockLastAction,
+    },
+    upstreamExtraJson: runtime.upstreamExtraJson,
+    upstreamExcludePaths: runtime.upstreamExcludePaths,
+    upstreamHeaders: runtime.upstreamHeaders,
+    upstreamExcludeHeaders: runtime.upstreamExcludeHeaders,
+  }, null, 2);
+}
+
+function filteredRequests() {
+  return state.requests.filter((item) => {
+    if (state.filters.cache && item.cacheResult !== state.filters.cache) return false;
+    return true;
+  });
+}
+
+function tableCell(row, value, className) {
+  const td = document.createElement('td');
+  if (className) td.className = className;
+  td.textContent = text(value);
+  row.appendChild(td);
+  return td;
+}
+
+function renderRequests() {
+  const rows = $('requestRows');
+  const items = filteredRequests();
+  const pageSize = Number(state.pageSize);
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  state.page = Math.min(Math.max(1, state.page), totalPages);
+  const start = (state.page - 1) * pageSize;
+  const pageItems = items.slice(start, start + pageSize);
+  clearNode(rows);
+
+  if (!pageItems.length) {
+    const tr = document.createElement('tr');
+    const td = tableCell(tr, '还没有匹配的诊断请求。先开启诊断，再从酒馆发一条消息。');
+    td.colSpan = 8;
+    rows.appendChild(tr);
+  }
+
+  for (const item of pageItems) {
+    const tr = document.createElement('tr');
+    tableCell(tr, timeLabel(item.capturedAt));
+
+    const model = tableCell(tr, '');
+    appendText(model, 'strong', text(item.model, '未知模型'));
+    model.appendChild(document.createElement('br'));
+    appendText(model, 'small', upstreamModeLabel(item.upstreamMode));
+
+    const provider = tableCell(tr, '');
+    provider.append(document.createTextNode(providerLabel(item)));
+    provider.appendChild(document.createElement('br'));
+    appendText(provider, 'small', text(item.upstreamProviderSource, 'not-returned'));
+
+    tableCell(tr, text(item.responseStatus));
+
+    const cache = tableCell(tr, '');
+    const badge = appendText(cache, 'span', cacheResultLabel(item.cacheResult), `badge ${cacheClass(item.cacheResult, item.responseStatus)}`);
+    badge.classList.add(cacheClass(item.cacheResult, item.responseStatus));
+
+    const prefix = tableCell(tr, '', 'td-mono');
+    prefix.append(document.createTextNode(compactHash(item.prefixHash)));
+    prefix.appendChild(document.createElement('br'));
+    appendText(prefix, 'small', `${item.prefixLength || 0} chars`);
+
+    const usage = tableCell(tr, '');
+    usage.append(document.createTextNode(`读 ${tokenLabel(item.cacheReadTokens)}`));
+    usage.appendChild(document.createElement('br'));
+    usage.append(document.createTextNode(`写 ${tokenLabel(item.cacheWriteTokens)}`));
+
+    const action = tableCell(tr, '');
+    const button = appendText(action, 'button', '详情', 'small');
+    button.onclick = () => viewRequest(item.id);
+    rows.appendChild(tr);
+  }
+
+  $('pageInfo').textContent = `${state.page} / ${totalPages} · 共 ${items.length}`;
+  $('prevPage').disabled = state.page <= 1;
+  $('nextPage').disabled = state.page >= totalPages;
+}
+
+function renderAll() {
+  renderTopbar();
+  renderDashboard();
+  renderCaptureControls();
+  renderChannels();
+  renderCache();
+  renderAdvanced();
+  renderRequests();
+}
+
+async function loadState() {
+  state.runtime = await api('/console/state');
+}
+
+async function loadRequests() {
+  const data = await api('/console/requests');
+  state.requests = data.requests || [];
+}
+
+async function refreshAll() {
+  await loadState();
+  await loadRequests();
+  renderAll();
+}
+
+function selectedSummary() {
+  const item = state.selected;
+  const usage = item?.response?.usage || {};
+  return {
+    id: item?.id,
+    capturedAt: item?.capturedAt,
+    upstream: item?.upstream?.url,
+    status: item?.response?.status,
+    cacheResult: item?.response?.cacheResult,
+    provider: item?.response?.upstreamProvider,
+    cache: item?.upstream?.cache,
+    prefixLock: item?.gateway?.prefixLock,
+    upstreamExtraJson: item?.gateway?.upstreamExtraJsonApplied,
+    usage,
+  };
+}
+
+function renderMetaGrid(root, entries) {
+  clearNode(root);
+  for (const [label, value, className] of entries) {
+    const cell = document.createElement('div');
+    cell.className = 'meta-cell';
+    appendText(cell, 'span', label, 'meta-label');
+    appendText(cell, 'span', value, `meta-value ${className || ''}`.trim());
+    root.appendChild(cell);
+  }
+}
+
+function contentText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.content === 'string') return value.content;
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+}
+
+function hasCacheControl(value) {
+  return Boolean(value && typeof value === 'object' && value.cache_control);
+}
+
+function getOrderedBodySegments(body, mode) {
+  const segments = [];
+  const add = (role, value, path, label) => {
+    segments.push({ role, value, path, label, cache: hasCacheControl(value), text: contentText(value) });
+  };
+
+  if (!body || typeof body !== 'object') return segments;
+
+  if (mode === 'anthropic') {
+    if (Array.isArray(body.system)) {
+      body.system.forEach((block, index) => add('system', block, `system[${index}]`, `block ${index}`));
+    } else if (body.system) {
+      add('system', body.system, 'system', 'system');
+    }
+  }
+
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  messages.forEach((message, messageIndex) => {
+    const role = message?.role || 'message';
+    if (Array.isArray(message?.content)) {
+      message.content.forEach((block, blockIndex) => add(role, block, `messages[${messageIndex}].content[${blockIndex}]`, `messages[${messageIndex}] · block ${blockIndex}`));
+    } else {
+      add(role, message?.content ?? message, `messages[${messageIndex}]`, `messages[${messageIndex}]`);
+    }
+  });
+
+  return segments;
+}
+
+function pathMatches(segmentPath, cachePath) {
+  if (!cachePath) return false;
+  return cachePath === segmentPath || cachePath === `${segmentPath}.cache_control` || cachePath.startsWith(`${segmentPath}.`);
+}
+
+function approxTokens(value) {
+  return Math.max(1, Math.round(contentText(value).length / 4));
+}
+
+function renderMessageCard(root, segment, index, isPrefix) {
+  const card = document.createElement('div');
+  card.className = `msg-card ${isPrefix ? 'is-prefix' : ''}`.trim();
+  const head = document.createElement('div');
+  head.className = 'msg-card-head';
+  const left = document.createElement('span');
+  left.className = 'msg-left';
+  const role = document.createElement('span');
+  role.className = 'msg-role';
+  const dot = document.createElement('span');
+  dot.className = `role-dot ${segment.role}`;
+  role.appendChild(dot);
+  role.append(document.createTextNode(String(segment.role).toUpperCase()));
+  left.appendChild(role);
+  appendText(left, 'span', `#${index} · ${segment.label || segment.path}`, 'msg-index');
+  const right = document.createElement('span');
+  right.className = 'msg-right';
+  appendText(right, 'span', `≈ ${approxTokens(segment.value)} tok`, 'msg-meta');
+  appendText(right, 'span', '▾', 'msg-caret');
+  head.append(left, right);
+  head.onclick = () => card.classList.toggle('collapsed');
+  const body = appendText(card, 'div', segment.text || '（空内容）', 'msg-body');
+  body.onclick = (event) => event.stopPropagation();
+  card.prepend(head);
+  root.appendChild(card);
+}
+
+function renderCacheDivider(root, cache) {
+  const divider = document.createElement('div');
+  divider.className = 'cache-divider';
+  const icon = document.createElement('div');
+  icon.className = 'cache-icon';
+  icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4.5" y="10.5" width="15" height="10" rx="2.4" fill="currentColor"></rect><path d="M7.5 10.5V7.5C7.5 5.01 9.51 3 12 3C14.49 3 16.5 5.01 16.5 7.5V10.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"></path><circle cx="12" cy="15" r="1.6" fill="#fff"></circle><rect x="11.2" y="15.4" width="1.6" height="3" rx="0.8" fill="#fff"></rect></svg>';
+  const textWrap = document.createElement('div');
+  textWrap.className = 'cache-text';
+  appendText(textWrap, 'span', `[[CACHE_BREAK]] 第一缓存点 · cache_control(ephemeral, ${ttlLabel(state.selected?.gateway?.cacheTtl)})`, 'cache-title');
+  appendText(textWrap, 'span', `以上为缓存前缀 · Prefix Hash ${compactHash(cache?.prefixHash)} · ${cache?.prefixLength || 0} chars`, 'cache-sub');
+  divider.append(icon, textWrap);
+  root.appendChild(divider);
+}
+
+function renderRequestBodyStream(root, capture, prefixOnly = false) {
+  clearNode(root);
+  const body = capture?.upstream?.body;
+  const mode = capture?.upstream?.mode || capture?.gateway?.upstreamMode;
+  const cache = capture?.upstream?.cache || {};
+  const segments = getOrderedBodySegments(body, mode);
+  const firstCachePath = cache.firstCacheControlPath;
+  let cacheIndex = segments.findIndex((segment) => segment.cache || pathMatches(segment.path, firstCachePath));
+  if (cacheIndex < 0 && prefixOnly) cacheIndex = segments.length - 1;
+  const visible = prefixOnly && cacheIndex >= 0 ? segments.slice(0, cacheIndex + 1) : segments;
+
+  if (!visible.length) {
+    appendText(root, 'div', '没有可视化请求体。可在“原始 JSON”中查看完整诊断。', 'empty-hint');
+    return;
+  }
+
+  visible.forEach((segment, index) => {
+    const isPrefix = cacheIndex >= 0 && index <= cacheIndex;
+    renderMessageCard(root, segment, index, isPrefix);
+    if (index === cacheIndex) renderCacheDivider(root, cache);
+  });
+}
+
+function renderDetail() {
+  const item = state.selected;
+  if (!item) return;
+  const provider = item.response?.upstreamProvider || {};
+  const usage = item.response?.usage || {};
+  $('drawerTitle').textContent = item.upstream?.body?.model || item.gateway?.transformedBody?.model || item.id;
+  $('drawerEyebrow').textContent = `${channelName(state.runtime)} · ${provider.provider || 'provider not returned'}`;
+  $('detailId').textContent = `ID: ${item.id}`;
+  renderMetaGrid($('detailMetaGrid'), [
+    ['缓存结果', cacheResultLabel(item.response?.cacheResult), item.response?.cacheResult === 'hit' ? 'success' : ''],
+    ['最终供应商', provider.provider || 'unknown', 'coral'],
+    ['响应状态', item.response?.status],
+    ['输入 Token', usage.inputTokens],
+    ['缓存读取', usage.cacheReadTokens, 'success'],
+    ['缓存写入', usage.cacheWriteTokens],
+    ['输出 Token', usage.outputTokens],
+    ['Prefix', compactHash(item.upstream?.cache?.prefixHash)],
+  ]);
+
+  const tabPayloads = {
+    summary: selectedSummary(),
+    headers: {
+      inbound: item.inbound?.headersSummary,
+      upstream: item.upstream?.headersSummary,
+      response: item.response?.headersSummary,
+    },
+    raw: item,
+  };
+
+  const showBody = state.selectedTab === 'body';
+  $('detailBodyTab').hidden = !showBody;
+  $('detailPre').hidden = showBody;
+  if (showBody) {
+    renderRequestBodyStream($('detailBodyStream'), item);
+  } else {
+    $('detailPre').textContent = JSON.stringify(tabPayloads[state.selectedTab] ?? tabPayloads.summary, null, 2);
+  }
+  $('download').disabled = false;
+  setStatus(`已选择：${item.id}`);
+}
+
+async function viewRequest(id) {
+  state.selected = await api(`/console/requests/${encodeURIComponent(id)}`);
+  state.selectedTab = 'body';
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.classList.toggle('active', tab.dataset.tab === 'body');
+  }
+  renderDetail();
+  setDrawerOpen('detailDrawer', true);
+}
+
+function closeDrawer() {
+  setDrawerOpen('detailDrawer', false);
+}
+
+function closePrefixModal() {
+  setDrawerOpen('prefixModal', false);
+}
+
+function closeGuide() {
+  setDrawerOpen('guideModal', false);
+}
+
+async function applyTtl(value) {
+  await postJson('/console/cache-ttl', { ttl: value });
+  await refreshAll();
+  setStatus(`TTL 已切换为 ${ttlLabel(value)}`);
+}
+
+async function addCustomChannel() {
+  customChannelSeq += 1;
+  const draft = {
+    id: `draft-channel-${customChannelSeq}`,
+    name: `自定义渠道 ${customChannelSeq}`,
+    kind: 'custom',
+    baseUrl: '',
+    upstreamMode: 'anthropic',
+    upstreamExtraJson: {},
+    upstreamExcludePaths: [],
+    upstreamHeaders: {},
+    upstreamExcludeHeaders: [],
+    isDraft: true,
+  };
+  state.channelDrafts.push(draft);
+  renderChannels();
+  setStatus('请填写上游 URL 后保存配置。');
+  const card = document.querySelector(`[data-channel="${draft.id}"]`);
+  const urlInput = card?.querySelector('[data-channel-url]');
+  if (urlInput) urlInput.focus();
+}
+
+async function openPrefixModal(event) {
+  if (event) event.preventDefault();
+  const runtime = state.runtime;
+  const hash = runtime?.prefixLockHash;
+  $('prefixModalTitle').textContent = hash || '未锁定';
+  $('prefixModalHint').textContent = hash ? `Prefix ID: ${hash}` : 'Prefix 未锁定';
+  renderMetaGrid($('prefixMetaGrid'), [
+    ['Prefix Hash', hash || '-'],
+    ['缓存点路径', runtime?.prefixLockFirstCacheControlPath || '-'],
+    ['替换次数', runtime?.prefixLockReplacements || 0],
+  ]);
+  clearNode($('prefixBodyStream'));
+
+  const match = hash && state.requests.find((item) => item.prefixHash === hash || item.prefixLockHash === hash);
+  if (match) {
+    const full = await api(`/console/requests/${encodeURIComponent(match.id)}`);
+    renderRequestBodyStream($('prefixBodyStream'), full, true);
+  } else {
+    appendText($('prefixBodyStream'), 'div', '当前状态没有直接暴露锁定前缀正文。开启诊断并发送一次命中该 Prefix 的请求后，可以从最近请求复原展示。', 'empty-hint');
+  }
+  setDrawerOpen('prefixModal', true);
+}
+
+function bindEvents() {
+  for (const item of document.querySelectorAll('.nav-item')) item.onclick = () => switchPage(item.dataset.page);
+
+  $('refreshAll').onclick = () => refreshAll().catch((error) => setStatus(error.message));
+  $('dashboardRefresh').onclick = $('refreshAll').onclick;
+  $('cacheTranslationSwitch').onchange = async () => { await postJson('/console/cache-translation', { enabled: $('cacheTranslationSwitch').checked }); await refreshAll(); setStatus($('cacheTranslationSwitch').checked ? '缓存转译已开启' : '缓存转译已关闭，高级配置仍会生效'); };
+  $('quickCaptureSwitch').onchange = async () => { await postJson('/console/capture', { enabled: $('quickCaptureSwitch').checked }); await refreshAll(); setStatus($('quickCaptureSwitch').checked ? '诊断已开启' : '诊断已关闭'); };
+  $('quickPrefixSwitch').onchange = async () => { await postJson('/console/prefix-lock', { enabled: $('quickPrefixSwitch').checked }); await refreshAll(); setStatus($('quickPrefixSwitch').checked ? 'Prefix Lock 已开启' : 'Prefix Lock 已关闭并清空'); };
+
+  for (const button of document.querySelectorAll('#quickTtlSeg button, #cacheTtlSeg button')) button.onclick = () => applyTtl(button.dataset.ttl);
+  $('prefixLockSwitch').onchange = async () => { await postJson('/console/prefix-lock', { enabled: $('prefixLockSwitch').checked }); await refreshAll(); setStatus($('prefixLockSwitch').checked ? 'Prefix Lock 已开启' : 'Prefix Lock 已关闭并清空'); };
+  $('prefixLockClear').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await refreshAll(); setStatus('Prefix Lock 已清空'); };
+  $('prefixModalClear').onclick = $('prefixLockClear').onclick;
+
+  $('logsCaptureSwitch').onchange = async () => { await postJson('/console/capture', { enabled: $('logsCaptureSwitch').checked }); await refreshAll(); setStatus($('logsCaptureSwitch').checked ? '诊断已开启' : '诊断已关闭'); };
+  $('clear').onclick = async () => { await api('/console/clear', { method: 'POST' }); state.selected = null; await refreshAll(); setStatus('日志已清空'); };
+  $('refreshCaptures').onclick = async () => { await loadRequests(); renderRequests(); setStatus('日志已刷新'); };
+  $('filterCache').onchange = () => { state.filters.cache = $('filterCache').value; state.page = 1; renderRequests(); };
+  $('pageSize').onchange = () => { state.pageSize = Number($('pageSize').value); state.page = 1; renderRequests(); };
+  $('prevPage').onclick = () => { state.page -= 1; renderRequests(); };
+  $('nextPage').onclick = () => { state.page += 1; renderRequests(); };
+
+  $('extraJsonOff').onclick = async () => { await postJson('/console/upstream-extra-json', { value: {} }); await refreshAll(); setStatus('包含主体参数已清空'); };
+  $('extraJsonFormat').onclick = () => { $('upstreamExtraJson').value = JSON.stringify(JSON.parse($('upstreamExtraJson').value || '{}'), null, 2); setStatus('包含主体参数已格式化'); };
+  $('extraJsonApply').onclick = async () => { await postJson('/console/upstream-extra-json', { json: $('upstreamExtraJson').value }); await refreshAll(); setStatus('包含主体参数已应用'); };
+  $('excludePathsOff').onclick = async () => { await postJson('/console/upstream-exclude-paths', { paths: [] }); await refreshAll(); setStatus('排除主体参数已清空'); };
+  $('excludePathsApply').onclick = async () => { await postJson('/console/upstream-exclude-paths', { value: $('upstreamExcludePaths').value }); await refreshAll(); setStatus('排除主体参数已应用'); };
+  $('headersOff').onclick = async () => { await postJson('/console/upstream-headers', { headers: {} }); await refreshAll(); setStatus('包含请求头已清空'); };
+  $('headersFormat').onclick = () => { $('upstreamHeaders').value = JSON.stringify(JSON.parse($('upstreamHeaders').value || '{}'), null, 2); setStatus('请求头 JSON 已格式化'); };
+  $('headersApply').onclick = async () => { await postJson('/console/upstream-headers', { headers: $('upstreamHeaders').value }); await refreshAll(); setStatus('包含请求头已应用'); };
+  $('excludeHeadersOff').onclick = async () => { await postJson('/console/upstream-exclude-headers', { headers: [] }); await refreshAll(); setStatus('排除请求头已清空'); };
+  $('excludeHeadersApply').onclick = async () => { await postJson('/console/upstream-exclude-headers', { value: $('upstreamExcludeHeaders').value }); await refreshAll(); setStatus('排除请求头已应用'); };
+
+  $('closeDrawer').onclick = closeDrawer;
+  $('drawerBackdrop').onclick = closeDrawer;
+  $('closePrefixModal').onclick = closePrefixModal;
+  $('prefixBackdrop').onclick = closePrefixModal;
+  $('openGuide').onclick = () => setDrawerOpen('guideModal', true);
+  $('closeGuide').onclick = closeGuide;
+  $('guideBackdrop').onclick = closeGuide;
+
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.onclick = () => {
+      state.selectedTab = tab.dataset.tab;
+      for (const item of document.querySelectorAll('.tab')) item.classList.toggle('active', item === tab);
+      renderDetail();
+    };
+  }
+  $('expandAllMessages').onclick = () => document.querySelectorAll('#detailBodyStream .msg-card').forEach((card) => card.classList.remove('collapsed'));
+  $('collapseAllMessages').onclick = () => document.querySelectorAll('#detailBodyStream .msg-card').forEach((card) => card.classList.add('collapsed'));
+  $('download').onclick = () => state.selected && downloadJson(state.selected, `st-claude-cache-gateway-request-${state.selected.id}.json`);
+
+  for (const item of document.querySelectorAll('.guide-toc-item')) {
+    item.onclick = (event) => {
+      event.preventDefault();
+      document.querySelectorAll('.guide-toc-item').forEach((link) => link.classList.remove('active'));
+      item.classList.add('active');
+      const target = document.querySelector(item.getAttribute('href'));
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+  }
+}
+
+bindEvents();
+refreshAll().catch((error) => {
+  setStatus(error.message);
+  $('cacheControl').textContent = error.message;
+});

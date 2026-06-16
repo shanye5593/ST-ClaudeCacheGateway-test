@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ST Claude Cache Gateway 控制台</title>
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <g fill="currentColor">
+            <path d="M50 50C50 40 43 28 50 10C57 28 50 40 50 50Z"></path>
+            <path d="M50 50C50 60 57 72 50 90C43 72 50 60 50 50Z"></path>
+            <path d="M50 50C60 50 72 43 90 50C72 57 60 50 50 50Z"></path>
+            <path d="M50 50C40 50 28 57 10 50C28 43 40 50 50 50Z"></path>
+            <path d="M50 50C57 43 65 30 78 22C68 35 57 43 50 50Z"></path>
+            <path d="M50 50C43 57 35 70 22 78C32 65 43 57 50 50Z"></path>
+            <path d="M50 50C57 57 70 65 78 78C65 68 57 57 50 50Z"></path>
+            <path d="M50 50C43 43 30 35 22 22C35 32 43 43 50 50Z"></path>
+            <circle cx="50" cy="50" r="4.5"></circle>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">Claude Cache</div>
+        <div class="brand-subtitle">多渠道缓存网关</div>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <button class="nav-item active" data-page="dashboard">网关概览</button>
+      <button class="nav-item" data-page="channels">渠道配置</button>
+      <button class="nav-item" data-page="cache">缓存策略</button>
+      <button class="nav-item" data-page="logs">请求日志</button>
+      <button class="nav-item" data-page="advanced">高级配置</button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <span class="sidebar-address" id="sidebarAddress">127.0.0.1:8788</span>
+      <button id="refreshAll" class="ghost small">刷新状态</button>
+      <span class="note" id="selectedHint">控制台准备中</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">Anthropic 体验控制台</div>
+        <h1 id="pageTitle">网关概览</h1>
+      </div>
+      <div class="status-pills">
+        <span class="pill" id="topChannel">渠道：加载中</span>
+        <span class="pill" id="topCapture">诊断：加载中</span>
+        <span class="pill" id="topPrefix">强制锁定：加载中</span>
+      </div>
+    </header>
+
+    <section class="page active" id="page-dashboard">
+      <div class="hero-card guide-hero">
+        <div>
+          <div class="eyebrow hero-eyebrow">使用指南</div>
+          <p>
+            <b>① 查看完整指南</b>。<br>
+            <b>② 客户端设置</b>：Base URL 填 <code>http://127.0.0.1:8788/v1</code>。<br>
+            <b>③ 手动缓存标记</b>：在预设中新建条目写入标记 <code>[[CACHE_BREAK]]</code>，并调整到正确的位置。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="primary" id="openGuide">查看完整指南</button>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <article class="stat-card">
+          <span>缓存转译</span>
+          <div class="stat-row"><strong id="statCacheTranslation">-</strong><label class="switch" aria-label="切换缓存转译"><input type="checkbox" id="cacheTranslationSwitch"><span class="track"></span><span class="thumb"></span></label></div>
+          <small>缓存标记与 Prefix Lock</small>
+        </article>
+        <article class="stat-card">
+          <span>上游格式</span>
+          <strong id="statUpstreamMode">-</strong>
+          <small id="statUpstreamUrl">加载中</small>
+        </article>
+        <article class="stat-card">
+          <span>当前缓存 TTL</span>
+          <strong id="statTtl">-</strong>
+          <small>缓存有效期窗口</small>
+        </article>
+        <article class="stat-card">
+          <span>Prefix 记录</span>
+          <strong class="td-mono" id="statPrefixHash">-</strong>
+          <small id="statPrefixDetail">等待状态</small>
+        </article>
+      </div>
+
+      <div class="two-col">
+        <section class="panel">
+          <div class="panel-head"><h3>当前状态</h3><button class="ghost small" id="dashboardRefresh">刷新</button></div>
+          <div class="kv-list" id="runtimeKv"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h3>快速动作</h3></div>
+          <div class="quick-stack">
+            <div class="quick-row">
+              <span>请求诊断 <em id="mockCaptureState">加载中</em></span>
+              <label class="switch" aria-label="快速切换请求诊断"><input type="checkbox" id="quickCaptureSwitch"><span class="track"></span><span class="thumb"></span></label>
+            </div>
+            <div class="quick-row">
+              <span>强制 Prefix 锁定 <em id="mockLockState">加载中</em></span>
+              <label class="switch" aria-label="快速切换 Prefix 锁定"><input type="checkbox" id="quickPrefixSwitch"><span class="track"></span><span class="thumb"></span></label>
+            </div>
+            <div class="quick-row">
+              <span>缓存 TTL <em id="mockTtlState">加载中</em></span>
+              <div class="seg" id="quickTtlSeg"><button data-ttl="1h">1 小时</button><button data-ttl="">5 分钟</button></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="page" id="page-channels">
+      <div class="channel-grid" id="channelGrid">
+        <article class="channel-card active" data-channel="openrouter">
+          <h3>OpenRouter</h3>
+          <div class="channel-form">
+            <div class="form-row">
+              <label>上游 URL<input id="openRouterUrl" value="https://openrouter.ai/api/v1"></label>
+              <label>锁定供应商<select id="openRouterProvider"><option value="">无（不锁定）</option><option value="Amazon Bedrock">Amazon Bedrock</option><option value="Google Vertex">Google Vertex</option><option value="Anthropic">Anthropic</option><option value="Google AI Studio">Google AI Studio</option></select></label>
+            </div>
+            <label>上游格式<select id="openRouterMode"><option value="anthropic">Anthropic native /v1/messages</option><option value="openai" selected>OpenAI-compatible</option></select></label>
+          </div>
+          <button class="primary">应用 OpenRouter 设置</button>
+        </article>
+
+        <article class="channel-card" data-channel="anthropic">
+          <h3>Anthropic</h3>
+          <div class="channel-form">
+            <label>上游 URL<input value="https://api.anthropic.com"></label>
+            <label>上游格式<select><option value="anthropic" selected>Anthropic native /v1/messages</option><option value="openai">OpenAI-compatible</option></select></label>
+          </div>
+          <button data-mode-card="anthropic">选择渠道</button>
+        </article>
+
+        <article class="channel-card" data-channel="vertex">
+          <h3>Google Vertex AI</h3>
+          <div class="channel-form">
+            <label>上游 URL<input value="https://us-east5-aiplatform.googleapis.com"></label>
+            <label>上游格式<select><option value="anthropic" selected>Anthropic native /v1/messages</option><option value="openai">OpenAI-compatible</option></select></label>
+          </div>
+          <button data-mode-card="anthropic">选择渠道</button>
+        </article>
+
+        <article class="channel-card" data-channel="bedrock">
+          <h3>Amazon Bedrock</h3>
+          <div class="channel-form">
+            <label>上游 URL<input value="https://bedrock-runtime.us-east-1.amazonaws.com"></label>
+            <label>上游格式<select><option value="anthropic" selected>Anthropic native /v1/messages</option><option value="openai">OpenAI-compatible</option></select></label>
+          </div>
+          <button data-mode-card="anthropic">选择渠道</button>
+        </article>
+
+        <article class="channel-card" data-channel="pioneer">
+          <h3>Pioneer</h3>
+          <div class="channel-form">
+            <label>上游 URL<input id="channelBaseUrl" readonly></label>
+            <label>上游格式<select id="channelUpstreamMode"><option value="anthropic">Anthropic native /v1/messages</option><option value="openai">OpenAI-compatible</option></select></label>
+          </div>
+          <button id="channelSaveMode">应用上游格式</button>
+        </article>
+
+        <article class="channel-card add-card" id="addChannelCard">
+          <div class="add-plus">+</div>
+          <h3>自定义渠道</h3>
+        </article>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head"><h3>当前渠道说明</h3><span class="badge" id="channelStateBadge">加载中</span></div>
+        <p class="note">Profile 会持久化渠道名称、Base URL、上游格式和额外 JSON；不会保存 API Key。切换渠道后，新请求会立即使用当前 Profile。</p>
+      </section>
+    </section>
+
+    <section class="page" id="page-cache">
+      <section class="panel">
+        <div class="panel-head"><h3>缓存原理</h3></div>
+        <div class="prompt-map">
+          <div class="prompt-block stable">稳定前缀<br><small>世界书 / 角色卡 / 系统设定</small></div>
+          <div class="marker">[[CACHE_BREAK]]</div>
+          <div class="prompt-block dynamic">动态后缀<br><small>近期聊天 / 当前输入</small></div>
+        </div>
+        <p class="note cache-note">缓存命中的关键：把大段不变的内容放在 <span class="marker-code">[[CACHE_BREAK]]</span> 之前，动态变化的内容放在它之后。前缀越稳定，命中率越高。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h3>缓存标记与 TTL</h3></div>
+        <div class="set-row">
+          <div class="set-info"><div class="set-title">缓存断点标记</div><div class="set-desc">在稳定内容末尾插入此标记，网关会在该处注入 cache_control。最多支持 4 个断点。</div></div>
+          <div class="set-control"><span class="marker-code">[[CACHE_BREAK]]</span></div>
+        </div>
+        <div class="set-row">
+          <div class="set-info"><div class="set-title">缓存有效期 TTL</div><div class="set-desc">1 小时使用 Claude 原生长缓存窗口；5 分钟表示不发送 ttl，使用供应商默认 ephemeral 窗口。</div></div>
+          <div class="set-control"><div class="seg" id="cacheTtlSeg"><button data-ttl="1h">1 小时</button><button data-ttl="">5 分钟</button></div></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h3>强制 Prefix 锁定</h3><span class="lock-state-badge" id="prefixLockBadge">加载中</span></div>
+        <div class="set-row">
+          <div class="set-info"><div class="set-title">开启强制锁定</div><div class="set-desc">首个带缓存点的请求会学习其前缀；之后请求强制替换为锁定前缀，杜绝前缀漂移导致的缓存失效。</div></div>
+          <div class="set-control"><label class="switch"><input type="checkbox" id="prefixLockSwitch"><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+        <div class="set-row">
+          <div class="set-info"><div class="set-title">当前锁定状态</div><div class="set-desc">换角色 / 世界书 / 预设后请清空重学。</div></div>
+          <div class="set-control"><button class="danger-light" id="prefixLockClear">清空重学</button></div>
+        </div>
+        <div class="kv-list" id="prefixLockKv"></div>
+      </section>
+    </section>
+
+    <section class="page" id="page-logs">
+      <section class="panel">
+        <div class="log-toolbar">
+          <div class="log-filters">
+            <label class="field"><span>缓存结果</span><select id="filterCache"><option value="">全部</option><option value="hit">命中</option><option value="creation">写入</option><option value="none">无读写</option><option value="unknown">未知</option></select></label>
+            <label class="field"><span>每页</span><select id="pageSize"><option>10</option><option selected>20</option></select></label>
+          </div>
+          <div class="log-controls">
+            <label class="toggle-field"><span>请求诊断 <em id="logsCaptureState">加载中</em></span><span class="switch"><input type="checkbox" id="logsCaptureSwitch"><span class="track"></span><span class="thumb"></span></span></label>
+            <button id="refreshCaptures" class="primary">刷新</button>
+            <button id="clear" class="danger-light">清空</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>渠道 / 供应商</th><th>状态</th><th>缓存结果</th><th>Prefix Hash</th><th>用量</th><th>详情</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+        <div class="pagination"><button id="prevPage">上一页</button><span id="pageInfo">1 / 1</span><button id="nextPage">下一页</button></div>
+      </section>
+    </section>
+
+    <section class="page" id="page-advanced">
+      <section class="panel">
+        <div class="panel-head"><h3>主体参数处理</h3><span id="extraJsonBadge" class="badge">加载中</span></div>
+        <p class="note">只在 OpenAI-compatible 上游格式生效。包含参数会深度合并到最终请求体；排除参数会在发送上游前按字段路径删除。不要在这里填写 API Key。</p>
+        <div class="advanced-grid">
+          <div class="param-box">
+            <div class="param-head"><h4>包含主体参数</h4><span>JSON 对象</span></div>
+            <textarea id="upstreamExtraJson" spellcheck="false">{}</textarea>
+            <div class="button-row"><button id="extraJsonOff">清空包含参数</button><button id="extraJsonFormat">格式化 JSON</button><button id="extraJsonApply" class="primary">应用包含</button></div>
+          </div>
+          <div class="param-box">
+            <div class="param-head"><h4>排除主体参数</h4><span>一行一个字段路径</span></div>
+            <textarea id="upstreamExcludePaths" spellcheck="false" placeholder="stream_options&#10;metadata.trace_id"></textarea>
+            <div class="button-row"><button id="excludePathsOff">清空排除参数</button><button id="excludePathsApply" class="primary">应用排除</button></div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h3>请求头处理</h3><span id="headerOverrideBadge" class="badge">加载中</span></div>
+        <p class="note">按当前渠道 Profile 保存安全请求头。包含请求头会添加/覆写非密钥 header；排除请求头会在发送上游前删除指定 header。Authorization、x-api-key、Cookie 等密钥头不能保存。</p>
+        <div class="advanced-grid">
+          <div class="param-box">
+            <div class="param-head"><h4>包含请求头</h4><span>JSON 对象</span></div>
+            <textarea id="upstreamHeaders" spellcheck="false" placeholder='{&#10;  "HTTP-Referer": "https://example.com",&#10;  "X-Title": "ST Claude Cache Gateway"&#10;}'>{}</textarea>
+            <div class="button-row"><button id="headersOff">清空包含请求头</button><button id="headersFormat">格式化 JSON</button><button id="headersApply" class="primary">应用包含</button></div>
+          </div>
+          <div class="param-box">
+            <div class="param-head"><h4>排除请求头</h4><span>一行一个 Header 名</span></div>
+            <textarea id="upstreamExcludeHeaders" spellcheck="false" placeholder="x-real-ip&#10;x-forwarded-for"></textarea>
+            <div class="button-row"><button id="excludeHeadersOff">清空排除请求头</button><button id="excludeHeadersApply" class="primary">应用排除</button></div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h3>当前 cache_control / 状态 JSON</h3></div>
+        <pre id="cacheControl">加载中...</pre>
+      </section>
+    </section>
+  </main>
+</div>
+
+<aside class="drawer" id="detailDrawer" aria-hidden="true">
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <div class="drawer-panel">
+    <div class="drawer-head">
+      <div><div class="eyebrow" id="drawerEyebrow">Request Detail</div><h2 id="drawerTitle">请求详情</h2></div>
+      <button id="closeDrawer" class="ghost">✕</button>
+    </div>
+    <div class="meta-grid" id="detailMetaGrid"></div>
+    <div class="tabs">
+      <button class="tab active" data-tab="body">最终请求体</button>
+      <button class="tab" data-tab="summary">摘要</button>
+      <button class="tab" data-tab="headers">Headers</button>
+      <button class="tab" data-tab="raw">原始 JSON</button>
+    </div>
+    <div id="detailBodyTab">
+      <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
+      <div class="body-stream" id="detailBodyStream"></div>
+    </div>
+    <pre id="detailPre" hidden>暂无选择。</pre>
+    <div class="drawer-actions"><button id="download" class="primary" disabled>下载诊断 JSON</button><span class="sidebar-address" id="detailId">请选择请求</span></div>
+  </div>
+</aside>
+
+<aside class="drawer" id="prefixModal" aria-hidden="true">
+  <div class="drawer-backdrop" id="prefixBackdrop"></div>
+  <div class="drawer-panel">
+    <div class="drawer-head">
+      <div><div class="eyebrow">Prefix Lock · 锁定内容</div><h2 id="prefixModalTitle">Prefix</h2></div>
+      <button id="closePrefixModal" class="ghost">✕</button>
+    </div>
+    <div class="meta-grid three" id="prefixMetaGrid"></div>
+    <div class="section-label">锁定的前缀内容（缓存点之前，按顺序）</div>
+    <div class="body-stream" id="prefixBodyStream"></div>
+    <div class="drawer-actions"><button class="danger-light" id="prefixModalClear">清空重学</button><span class="sidebar-address" id="prefixModalHint">Prefix</span></div>
+  </div>
+</aside>
+
+<aside class="drawer" id="guideModal" aria-hidden="true">
+  <div class="drawer-backdrop" id="guideBackdrop"></div>
+  <div class="drawer-panel">
+    <div class="drawer-head">
+      <div><div class="eyebrow">Documentation</div><h2>使用指南</h2></div>
+      <button id="closeGuide" class="ghost">✕</button>
+    </div>
+    <div class="guide-toc">
+      <a href="#g-quickstart" class="guide-toc-item active">快速开始</a>
+      <a href="#g-client" class="guide-toc-item">客户端接入</a>
+      <a href="#g-marker" class="guide-toc-item">缓存标记</a>
+      <a href="#g-prefixlock" class="guide-toc-item">Prefix 锁定</a>
+      <a href="#g-translation" class="guide-toc-item">缓存转译</a>
+      <a href="#g-channel" class="guide-toc-item">渠道</a>
+      <a href="#g-advanced" class="guide-toc-item">高级配置</a>
+      <a href="#g-diagnostics" class="guide-toc-item">诊断</a>
+      <a href="#g-faq" class="guide-toc-item">常见问题</a>
+    </div>
+    <div class="guide-body">
+      <section class="guide-section" id="g-quickstart">
+        <h3>快速开始</h3>
+        <ol>
+          <li>启动网关，确认控制台地址为 <code>http://127.0.0.1:8788/console</code>。</li>
+          <li>在酒馆 / 客户端里选择 OpenAI-compatible / Chat Completion 接入。</li>
+          <li>Base URL 填 <code>http://127.0.0.1:8788/v1</code>，API Key 填你的上游供应商 Key。</li>
+          <li>发送一条测试消息；需要排查时再临时打开“请求诊断”。</li>
+        </ol>
+        <p class="guide-callout">默认渠道是 Pioneer，默认上游格式是 Anthropic native。也就是说：客户端用 OAI 方式接入网关，网关再把请求转成 Claude 原生格式发给上游。</p>
+      </section>
+      <section class="guide-section" id="g-client">
+        <h3>客户端接入</h3>
+        <ul>
+          <li>本机使用：<code>http://127.0.0.1:8788/v1</code></li>
+          <li>手机 / 局域网访问：启动时设置 <code>HOST=0.0.0.0</code>，Base URL 填 <code>http://设备局域网IP:8788/v1</code>。</li>
+          <li>不要把 API Key 写进渠道 Profile。Key 应放在客户端的 Authorization / x-api-key，或仅在私有机器上用 <code>UPSTREAM_API_KEY</code> 环境变量。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-marker">
+        <h3>缓存标记</h3>
+        <p>在稳定的大段内容末尾放置 <code>[[CACHE_BREAK]]</code>，网关会移除标记并注入 Claude prompt cache 的 <code>cache_control</code>。</p>
+        <ul>
+          <li>适合放在标记前：系统提示词、角色卡、蓝灯世界书、长设定、固定规则。</li>
+          <li>适合放在标记后：绿灯世界书、最近聊天、当前输入、短期记忆、会频繁变化的内容。</li>
+          <li>Claude 每次请求最多支持 4 个缓存断点；多余标记会被移除但不会注入缓存控制。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-prefixlock">
+        <h3>Prefix 锁定 / 强制锁定</h3>
+        <p>Prefix 锁定用于处理“前缀漂移”：如果世界书、正则、插件或数据库填表内容在缓存点前产生变化，缓存命中率会下降。</p>
+        <ul>
+          <li>开启后，第一个带缓存点的请求会教会网关稳定前缀。</li>
+          <li>后续请求会用已学习的前缀替换当前请求的缓存点前内容，缓存点后的聊天、输入、绿灯世界书仍保持最新。</li>
+          <li>它是替换，不是追加，不会把世界书、系统提示词或角色卡重复拼接。</li>
+          <li>更换角色卡、世界书、预设或缓存点前内容后，请清空并重新学习。</li>
+          <li>关闭“缓存转译”后，Prefix 锁定也会跳过。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-translation">
+        <h3>缓存转译与 TTL</h3>
+        <ul>
+          <li>“缓存转译”开启时，网关会处理 <code>[[CACHE_BREAK]]</code>、注入 <code>cache_control</code>，并允许 Prefix 锁定参与。</li>
+          <li>关闭后，网关不做缓存标记转译，也不会执行 Prefix 锁定；但渠道、高级配置、上游格式转换仍然生效。</li>
+          <li>TTL 选择 <code>1h</code> 会发送 Claude 1 小时缓存窗口；选择默认窗口则不发送 <code>ttl</code>，交给供应商默认处理。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-channel">
+        <h3>渠道与供应商</h3>
+        <ul>
+          <li>渠道 Profile 会保存名称、Base URL、上游格式和高级配置，不保存 API Key。</li>
+          <li>Pioneer 是默认自定义渠道；OpenRouter、Anthropic、Vertex、Bedrock 是内置模板。</li>
+          <li>OpenRouter 的“锁定供应商”会写入 provider 参数，可选择常见供应商，也可以填写自定义供应商名。</li>
+          <li>Vertex / Bedrock 卡片目前是 Profile 模板，不包含 Google Auth 或 AWS SigV4 签名；需要真实云鉴权时建议先走兼容供应商或自定义代理。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-advanced">
+        <h3>高级配置</h3>
+        <ul>
+          <li>包含主体参数：把 JSON 对象深度合并到最终请求体，只在 OpenAI-compatible 上游格式生效。</li>
+          <li>排除主体参数：按字段路径删除请求体字段，例如 <code>stream_options</code> 或 <code>metadata.trace_id</code>。</li>
+          <li>包含请求头：添加 / 覆写非密钥 header，例如 <code>HTTP-Referer</code>、<code>X-Title</code>。</li>
+          <li>排除请求头：发送上游前删除指定 header，例如 <code>x-real-ip</code>、<code>x-forwarded-for</code>。</li>
+        </ul>
+        <p class="guide-callout">高级配置按当前渠道保存。Authorization、x-api-key、Cookie、token、secret、password 等密钥类字段会被拒绝保存。</p>
+      </section>
+      <section class="guide-section" id="g-diagnostics">
+        <h3>诊断</h3>
+        <ul>
+          <li>请求诊断默认关闭，开启后只保存在内存里，重启即清空。</li>
+          <li>诊断会记录最终请求体，可能包含私密提示词；不要公开导出的诊断 JSON。</li>
+          <li>可通过诊断查看最终请求体、缓存断点、Prefix hash、suffix hash 和上游缓存用量。</li>
+        </ul>
+      </section>
+      <section class="guide-section" id="g-faq">
+        <h3>常见问题</h3>
+        <ul>
+          <li><b>Mac 打不开 bat？</b> <code>.bat</code> 只适用于 Windows。macOS / Linux 请用 <code>chmod +x start-gateway.sh</code> 后运行 <code>./start-gateway.sh</code>。</li>
+          <li><b>请求 404 或路径不对？</b> 酒馆 Base URL 优先填写 <code>http://127.0.0.1:8788/v1</code>。</li>
+          <li><b>缓存没命中？</b> 确认蓝灯世界书在 <code>[[CACHE_BREAK]]</code> 之前、绿灯世界书在它之后；必要时开启 Prefix 锁定排查前缀漂移。</li>
+          <li><b>使用数据库会影响缓存吗？</b> 数据库本身不影响缓存，官方渠道验证正常；若数据库蓝灯条目会随填表更新，请把全局注入位置改到缓存点后面，例如角色后、系统。</li>
+          <li><b>上游不支持 1h TTL？</b> 在“缓存策略”里切回默认窗口。</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</aside>
+
+<script src="/console.js"></script>
+</body>
+</html>

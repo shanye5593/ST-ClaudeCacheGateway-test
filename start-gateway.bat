@@ -9,11 +9,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo ST Claude Cache Gateway is starting at http://127.0.0.1:8789
+echo ST Claude Cache Gateway is starting at http://127.0.0.1:8788
 echo Upstream defaults to https://api.pioneer.ai
 echo.
 echo SillyTavern setup:
-echo   Base URL: http://127.0.0.1:8789
+echo   Base URL: http://127.0.0.1:8788/v1
 echo   API Key:  your upstream API key
 echo.
 echo Keep this window open while using SillyTavern.
