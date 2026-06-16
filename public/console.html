@@ -297,12 +297,14 @@
       <button class="tab" data-tab="headers">请求头</button>
       <button class="tab" data-tab="raw">诊断 JSON</button>
     </div>
-    <div class="meta-grid" id="detailMetaGrid"></div>
-    <div id="detailBodyTab">
-      <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
-      <div class="body-stream" id="detailBodyStream"></div>
+    <div class="detail-scroll">
+      <div class="meta-grid" id="detailMetaGrid"></div>
+      <div id="detailBodyTab">
+        <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
+        <div class="body-stream" id="detailBodyStream"></div>
+      </div>
+      <pre id="detailPre" hidden>暂无选择。</pre>
     </div>
-    <pre id="detailPre" hidden>暂无选择。</pre>
     <div class="drawer-actions"><button id="download" class="primary" disabled>下载诊断 JSON</button><span class="sidebar-address" id="detailId">请选择请求</span></div>
   </div>
 </aside>

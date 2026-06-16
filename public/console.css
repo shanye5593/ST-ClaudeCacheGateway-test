@@ -303,12 +303,13 @@ tr:hover td { background-color: var(--bg-app); }
 .drawer { display: none; position: fixed; inset: 0; z-index: 100; }
 .drawer.open { display: block; }
 .drawer-backdrop { position: absolute; inset: 0; background: rgba(25, 25, 25, 0.3); backdrop-filter: blur(1.5px); }
-.drawer-panel { position: absolute; right: 0; top: 0; height: 100%; width: min(840px, 98vw); background: var(--bg-panel); border-left: 1px solid var(--border-strong); padding: 28px 32px; overflow-y: auto; box-shadow: var(--shadow-popup); display: flex; flex-direction: column; }
+.drawer-panel { position: absolute; right: 0; top: 0; height: 100%; width: min(840px, 98vw); background: var(--bg-panel); border-left: 1px solid var(--border-strong); padding: 28px 32px; overflow: hidden; box-shadow: var(--shadow-popup); display: flex; flex-direction: column; }
+.detail-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .drawer-head { border-bottom: 1px solid var(--border-strong); padding-bottom: 18px; margin-bottom: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .drawer-head h2 { font-size: 22px; font-weight: 800; margin: 0; }
 .drawer-actions { margin-top: auto; padding-top: 18px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
-.detail-tabs { position: sticky; top: -28px; z-index: 3; background: var(--bg-panel); padding-top: 4px; }
+.detail-tabs { flex: 0 0 auto; z-index: 3; background: var(--bg-panel); padding-top: 4px; }
 .tab { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; box-shadow: none; color: var(--text-muted); padding: 8px 14px; font-size: 13.5px; }
 .tab:hover { background-color: var(--bg-hover); color: var(--text-main); transform: none; }
 .tab.active { border-bottom-color: var(--primary-coral); color: var(--text-main); }
@@ -439,7 +440,7 @@ tr:hover td { background-color: var(--bg-app); }
   .log-action-cell button { width: 100%; }
   .drawer-panel { width: 100vw; height: 100vh; height: 100dvh; padding: 22px 22px calc(34px + env(safe-area-inset-bottom, 0px)); }
   .tabs { overflow-x: auto; padding-bottom: 4px; }
-  .detail-tabs { top: -22px; margin-left: -22px; margin-right: -22px; padding-left: 22px; padding-right: 22px; }
+  .detail-tabs { margin-left: -22px; margin-right: -22px; padding-left: 22px; padding-right: 22px; }
   .tab { flex: 0 0 auto; }
   #detailPre { min-height: 52vh; }
   .kv { grid-template-columns: 1fr; gap: 4px; }
