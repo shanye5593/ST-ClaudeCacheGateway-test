@@ -111,6 +111,12 @@ pre {
   font-size: 13px;
 }
 
+#detailPre {
+  flex: 1 1 auto;
+  min-height: 420px;
+  max-height: none;
+}
+
 h1, h2, h3, p { margin-top: 0; }
 code {
   font-family: var(--font-mono);
@@ -225,6 +231,7 @@ code {
 .quick-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-app); }
 .quick-row span { font-weight: 700; font-size: 13.5px; }
 .quick-row em { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 6px; font-style: normal; }
+.quick-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
 
 .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
 .channel-card { position: relative; padding: 20px; display: flex; flex-direction: column; gap: 12px; border-color: var(--border-strong); }
@@ -407,7 +414,9 @@ tr:hover td { background-color: var(--bg-app); }
   .nav { grid-template-columns: 1fr; }
   .main { padding: 18px 14px calc(128px + env(safe-area-inset-bottom, 0px)); }
   .topbar { padding-left: 0; }
-  .topbar, .hero-card, .section-head, .quick-row, .set-row, .log-toolbar { flex-direction: column; align-items: stretch; }
+  .topbar, .hero-card, .section-head, .set-row, .log-toolbar { flex-direction: column; align-items: stretch; }
+  .quick-row { flex-direction: row; align-items: center; }
+  .quick-controls { justify-content: flex-end; }
   .log-controls { justify-content: space-between; }
   .stat-grid, .stat-grid.three, .two-col, .channel-grid, .advanced-grid, .meta-grid, .meta-grid.three, .prompt-map, .channel-form .form-row { grid-template-columns: 1fr; }
   .quick-panel { order: -1; }
@@ -424,5 +433,8 @@ tr:hover td { background-color: var(--bg-app); }
   .log-action-cell::before { display: none; }
   .log-action-cell button { width: 100%; }
   .drawer-panel { width: 100vw; height: 100vh; height: 100dvh; padding: 22px 22px calc(34px + env(safe-area-inset-bottom, 0px)); }
+  .tabs { overflow-x: auto; padding-bottom: 4px; }
+  .tab { flex: 0 0 auto; }
+  #detailPre { min-height: 52vh; }
   .kv { grid-template-columns: 1fr; gap: 4px; }
 }

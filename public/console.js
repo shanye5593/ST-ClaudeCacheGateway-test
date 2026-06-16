@@ -115,6 +115,35 @@ function tokenLabel(value) {
   return value === null || value === undefined ? '-' : value;
 }
 
+function upstreamStatsLabel(item) {
+  if (item?.responseStatus && item.responseStatus >= 400) return '请求失败';
+  if (item?.cacheReadTokens !== null && item?.cacheReadTokens !== undefined) return '有缓存读取';
+  if (item?.cacheWriteTokens !== null && item?.cacheWriteTokens !== undefined) return '有缓存写入';
+  if (item?.cacheResult && item.cacheResult !== 'unknown') return '有 usage';
+  return '未返回';
+}
+
+function upstreamStatsClass(item) {
+  if (item?.responseStatus && item.responseStatus >= 400) return 'danger';
+  if (upstreamStatsLabel(item) === '未返回') return '';
+  return 'success';
+}
+
+function cacheInjectLabel(item) {
+  if (!item?.cacheTranslationEnabled) return '转译关闭';
+  const injected = item?.injected ?? 0;
+  const removed = item?.removed ?? 0;
+  const count = item?.cacheControlCount ?? 0;
+  if (injected > 0 || removed > 0 || count > 0) return `注入 ${injected} / 缓存点 ${count}`;
+  return '未注入';
+}
+
+function prefixActionLabel(item) {
+  const action = item?.prefixLockAction || 'disabled';
+  const reason = item?.prefixLockReason;
+  return reason ? `${action} · ${reason}` : action;
+}
+
 function providerLabel(item) {
   return item?.upstreamProvider ? String(item.upstreamProvider) : 'unknown';
 }
@@ -643,26 +672,31 @@ function renderRequests() {
     model.appendChild(document.createElement('br'));
     appendText(model, 'small', upstreamModeLabel(item.upstreamMode));
 
-    const provider = tableCell(tr, '', '', '渠道 / 供应商');
-    provider.append(document.createTextNode(providerLabel(item)));
-    provider.appendChild(document.createElement('br'));
-    appendText(provider, 'small', text(item.upstreamProviderSource, 'not-returned'));
-
     tableCell(tr, text(item.responseStatus), '', '状态');
 
-    const cache = tableCell(tr, '', '', '缓存结果');
-    const badge = appendText(cache, 'span', cacheResultLabel(item.cacheResult), `badge ${cacheClass(item.cacheResult, item.responseStatus)}`);
-    badge.classList.add(cacheClass(item.cacheResult, item.responseStatus));
+    const injection = tableCell(tr, '', '', '缓存注入');
+    appendText(injection, 'span', cacheInjectLabel(item), `badge ${item.injected > 0 || item.cacheControlCount > 0 ? 'success' : ''}`.trim());
+    if (item.removed || item.overflowRemoved) {
+      injection.appendChild(document.createElement('br'));
+      appendText(injection, 'small', `移除 ${item.removed || 0} / 溢出 ${item.overflowRemoved || 0}`);
+    }
 
-    const prefix = tableCell(tr, '', 'td-mono', 'Prefix Hash');
-    prefix.append(document.createTextNode(compactHash(item.prefixHash)));
+    const prefix = tableCell(tr, '', 'td-mono', 'Prefix');
+    prefix.append(document.createTextNode(prefixActionLabel(item)));
     prefix.appendChild(document.createElement('br'));
-    appendText(prefix, 'small', `${item.prefixLength || 0} chars`);
+    appendText(prefix, 'small', compactHash(item.prefixHash));
 
-    const usage = tableCell(tr, '', '', '用量');
-    usage.append(document.createTextNode(`读 ${tokenLabel(item.cacheReadTokens)}`));
-    usage.appendChild(document.createElement('br'));
-    usage.append(document.createTextNode(`写 ${tokenLabel(item.cacheWriteTokens)}`));
+    const stats = tableCell(tr, '', '', '上游统计');
+    appendText(stats, 'span', upstreamStatsLabel(item), `badge ${upstreamStatsClass(item)}`.trim());
+    if (item.cacheReadTokens !== null || item.cacheWriteTokens !== null) {
+      stats.appendChild(document.createElement('br'));
+      appendText(stats, 'small', `读 ${tokenLabel(item.cacheReadTokens)} / 写 ${tokenLabel(item.cacheWriteTokens)}`);
+    }
+
+    const channel = tableCell(tr, '', '', '渠道');
+    channel.append(document.createTextNode(channelName(state.runtime)));
+    channel.appendChild(document.createElement('br'));
+    appendText(channel, 'small', providerLabel(item) === 'unknown' ? '供应商未返回' : providerLabel(item));
 
     rows.appendChild(tr);
   }
@@ -851,14 +885,14 @@ function renderDetail() {
   $('drawerEyebrow').textContent = `${channelName(state.runtime)} · ${provider.provider || 'provider not returned'}`;
   $('detailId').textContent = `ID: ${item.id}`;
   renderMetaGrid($('detailMetaGrid'), [
-    ['缓存结果', cacheResultLabel(item.response?.cacheResult), item.response?.cacheResult === 'hit' ? 'success' : ''],
-    ['最终供应商', provider.provider || 'unknown', 'coral'],
     ['响应状态', item.response?.status],
-    ['输入 Token', usage.inputTokens],
-    ['缓存读取', usage.cacheReadTokens, 'success'],
-    ['缓存写入', usage.cacheWriteTokens],
-    ['输出 Token', usage.outputTokens],
-    ['Prefix', compactHash(item.upstream?.cache?.prefixHash)],
+    ['缓存转译', item.gateway?.cacheTranslationEnabled ? '开启' : '关闭'],
+    ['注入断点', item.gateway?.conversion?.injected ?? 0, (item.gateway?.conversion?.injected ?? 0) > 0 ? 'success' : ''],
+    ['移除标记', item.gateway?.conversion?.removed ?? 0],
+    ['缓存点数量', item.upstream?.cache?.cacheControlCount ?? 0],
+    ['Prefix 动作', item.gateway?.prefixLock?.action || 'disabled'],
+    ['上游统计', usage.inputTokens || usage.cacheReadTokens || usage.cacheWriteTokens || usage.outputTokens ? '已返回' : '未返回'],
+    ['上游供应商', provider.provider || '未返回', provider.provider ? 'coral' : ''],
   ]);
 
   const tabPayloads = {
@@ -966,6 +1000,7 @@ function bindEvents() {
   $('cacheTranslationSwitch').onchange = async () => { await postJson('/console/cache-translation', { enabled: $('cacheTranslationSwitch').checked }); await refreshAll(); setStatus($('cacheTranslationSwitch').checked ? '缓存转译已开启' : '缓存转译已关闭，高级配置仍会生效'); };
   $('quickCaptureSwitch').onchange = async () => { await postJson('/console/capture', { enabled: $('quickCaptureSwitch').checked }); await refreshAll(); setStatus($('quickCaptureSwitch').checked ? '诊断已开启' : '诊断已关闭'); };
   $('quickPrefixSwitch').onchange = async () => { await postJson('/console/prefix-lock', { enabled: $('quickPrefixSwitch').checked }); await refreshAll(); setStatus($('quickPrefixSwitch').checked ? 'Prefix Lock 已开启' : 'Prefix Lock 已关闭并清空'); };
+  $('quickPrefixRefresh').onclick = async () => { await api('/console/prefix-lock/clear', { method: 'POST' }); await postJson('/console/prefix-lock', { enabled: true }); await refreshAll(); setStatus('Prefix Lock 已清空，下一次带缓存点请求会重新学习'); };
 
   for (const button of document.querySelectorAll('#quickTtlSeg button, #cacheTtlSeg button')) button.onclick = () => applyTtl(button.dataset.ttl);
   $('prefixLockSwitch').onchange = async () => { await postJson('/console/prefix-lock', { enabled: $('prefixLockSwitch').checked }); await refreshAll(); setStatus($('prefixLockSwitch').checked ? 'Prefix Lock 已开启' : 'Prefix Lock 已关闭并清空'); };

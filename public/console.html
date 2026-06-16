@@ -109,7 +109,7 @@
             </div>
             <div class="quick-row">
               <span>强制 Prefix 锁定 <em id="mockLockState">加载中</em></span>
-              <label class="switch" aria-label="快速切换 Prefix 锁定"><input type="checkbox" id="quickPrefixSwitch"><span class="track"></span><span class="thumb"></span></label>
+              <div class="quick-controls"><button class="ghost small" id="quickPrefixRefresh">刷新</button><label class="switch" aria-label="快速切换 Prefix 锁定"><input type="checkbox" id="quickPrefixSwitch"><span class="track"></span><span class="thumb"></span></label></div>
             </div>
             <div class="quick-row">
               <span>缓存 TTL <em id="mockTtlState">加载中</em></span>
@@ -228,7 +228,7 @@
       <section class="panel">
         <div class="log-toolbar">
           <div class="log-filters">
-            <label class="field"><span>缓存结果</span><select id="filterCache"><option value="">全部</option><option value="hit">命中</option><option value="creation">写入</option><option value="none">无读写</option><option value="unknown">未知</option></select></label>
+            <label class="field"><span>上游统计</span><select id="filterCache"><option value="">全部</option><option value="hit">有缓存读取</option><option value="creation">有缓存写入</option><option value="none">未返回缓存用量</option><option value="unknown">未知</option></select></label>
             <label class="field"><span>每页</span><select id="pageSize"><option>10</option><option selected>20</option></select></label>
           </div>
           <div class="log-controls">
@@ -237,7 +237,7 @@
             <button id="clear" class="danger-light">清空</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>详情</th><th>时间</th><th>模型</th><th>渠道 / 供应商</th><th>状态</th><th>缓存结果</th><th>Prefix Hash</th><th>用量</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>详情</th><th>时间</th><th>模型</th><th>状态</th><th>缓存注入</th><th>Prefix</th><th>上游统计</th><th>渠道</th></tr></thead><tbody id="requestRows"></tbody></table></div>
         <div class="pagination"><button id="prevPage">上一页</button><span id="pageInfo">1 / 1</span><button id="nextPage">下一页</button></div>
       </section>
     </section>
@@ -293,8 +293,8 @@
     <div class="meta-grid" id="detailMetaGrid"></div>
     <div class="tabs">
       <button class="tab active" data-tab="body">最终请求体</button>
-      <button class="tab" data-tab="summary">摘要</button>
-      <button class="tab" data-tab="headers">Headers</button>
+      <button class="tab" data-tab="summary">网关摘要</button>
+      <button class="tab" data-tab="headers">请求头</button>
       <button class="tab" data-tab="raw">原始 JSON</button>
     </div>
     <div id="detailBodyTab">
