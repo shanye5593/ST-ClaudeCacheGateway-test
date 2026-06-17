@@ -292,18 +292,17 @@
     </div>
     <div class="tabs detail-tabs">
       <button class="tab active" data-tab="body">最终请求体</button>
-      <button class="tab" data-tab="upstreamBody">最终请求体 JSON</button>
-      <button class="tab" data-tab="summary">网关摘要</button>
+      <button class="tab" data-tab="usage">Usage</button>
       <button class="tab" data-tab="headers">请求头</button>
+      <button class="tab" data-tab="upstreamBody">最终请求体 JSON</button>
       <button class="tab" data-tab="raw">诊断 JSON</button>
+      <button class="tab" data-tab="summary">网关摘要</button>
     </div>
     <div class="detail-scroll">
       <div class="meta-grid" id="detailMetaGrid"></div>
       <div id="detailBodyTab">
         <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
         <div class="body-stream" id="detailBodyStream"></div>
-        <div class="section-label">Usage</div>
-        <pre class="usage-pre" id="detailUsagePre">暂无 usage。</pre>
       </div>
       <pre id="detailPre" hidden>暂无选择。</pre>
     </div>

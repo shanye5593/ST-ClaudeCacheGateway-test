@@ -908,14 +908,15 @@ function renderDetail() {
   ]);
 
   const tabPayloads = {
-    upstreamBody: item.upstream?.body || item.gateway?.transformedBody || {},
-    summary: selectedSummary(),
+    usage: hasUsage(usage) ? usage : { message: '暂无 usage。' },
     headers: {
       inbound: item.inbound?.headersSummary,
       upstream: item.upstream?.headersSummary,
       response: item.response?.headersSummary,
     },
+    upstreamBody: item.upstream?.body || item.gateway?.transformedBody || {},
     raw: item,
+    summary: selectedSummary(),
   };
 
   const showBody = state.selectedTab === 'body';
@@ -923,9 +924,10 @@ function renderDetail() {
   $('detailPre').hidden = showBody;
   if (showBody) {
     renderRequestBodyStream($('detailBodyStream'), item);
-    $('detailUsagePre').textContent = formatUsage(usage);
   } else {
-    $('detailPre').textContent = JSON.stringify(tabPayloads[state.selectedTab] ?? tabPayloads.summary, null, 2);
+    $('detailPre').textContent = state.selectedTab === 'usage'
+      ? formatUsage(usage)
+      : JSON.stringify(tabPayloads[state.selectedTab] ?? tabPayloads.summary, null, 2);
   }
   $('download').disabled = false;
   setStatus(`已选择：${item.id}`);

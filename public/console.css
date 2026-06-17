@@ -124,10 +124,6 @@ pre {
   max-height: none;
 }
 
-.usage-pre {
-  min-height: 0;
-  max-height: 260px;
-}
 
 h1, h2, h3, p { margin-top: 0; }
 code {
