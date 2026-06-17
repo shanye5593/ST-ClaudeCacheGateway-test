@@ -1778,6 +1778,7 @@ async function proxyJsonRequest(request, path) {
     const upstreamResponse = await fetch(url, {
         method: request.method,
         headers: upstreamMode === 'anthropic' ? getAnthropicHeaders(request) : getForwardHeaders(request),
+        signal: request.signal,
     });
     const text = await upstreamResponse.text();
     const headers = addCorsHeaders(new Headers({
@@ -2103,10 +2104,11 @@ function convertAnthropicStreamToOpenAi(stream, model) {
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
+    let reader = null;
 
     return new ReadableStream({
         async start(controller) {
-            const reader = stream.getReader();
+            reader = stream.getReader();
 
             try {
                 while (true) {
@@ -2128,9 +2130,18 @@ function convertAnthropicStreamToOpenAi(stream, model) {
                         }
                     }
                 }
+            } catch (error) {
+                if (error?.name !== 'AbortError') {
+                    throw error;
+                }
             } finally {
-                controller.close();
+                try {
+                    controller.close();
+                } catch {}
             }
+        },
+        cancel() {
+            return reader?.cancel().catch(() => {});
         },
     });
 }
@@ -2160,6 +2171,7 @@ async function proxyChatCompletionsAnthropic(request, body, convertedBody, resul
         method: 'POST',
         headers: upstreamHeaders,
         body: JSON.stringify(anthropicBody),
+        signal: request.signal,
     });
 
     if (anthropicBody.stream) {
@@ -2220,6 +2232,7 @@ async function proxyAnthropicCountTokens(request) {
         method: 'POST',
         headers: getAnthropicHeaders(request),
         body: JSON.stringify(convertedBody),
+        signal: request.signal,
     });
     const text = await upstreamResponse.text();
 
@@ -2284,6 +2297,7 @@ async function proxyAnthropicMessages(request) {
         method: 'POST',
         headers: upstreamHeaders,
         body: JSON.stringify(convertedBody),
+        signal: request.signal,
     });
 
     const headers = addCorsHeaders(new Headers({
@@ -2375,6 +2389,7 @@ async function proxyChatCompletions(request) {
         method: 'POST',
         headers: upstreamHeaders,
         body: JSON.stringify(upstreamBody),
+        signal: request.signal,
     });
 
     if (convertedBody.stream) {
@@ -2451,6 +2466,28 @@ function staticTextResponse(path, contentType) {
 
 function consoleResponse() {
     return staticTextResponse('./public/console.html', 'text/html; charset=utf-8');
+}
+
+function isAbortError(error) {
+    return error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+}
+
+function waitForDrainOrAbort(res, signal) {
+    return new Promise((resolve) => {
+        const cleanup = () => {
+            res.off('drain', done);
+            res.off('close', done);
+            signal?.removeEventListener('abort', done);
+        };
+        const done = () => {
+            cleanup();
+            resolve();
+        };
+
+        res.once('drain', done);
+        res.once('close', done);
+        signal?.addEventListener('abort', done, { once: true });
+    });
 }
 
 function getCaptureSummary(capture) {
@@ -2803,6 +2840,11 @@ async function handleRequest(request) {
 
         return jsonResponse({ error: 'Not found.' }, 404);
     } catch (error) {
+        if (isAbortError(error) || request.signal?.aborted) {
+            log('Request aborted.', { path: url.pathname });
+            return new Response(null, { status: 499, statusText: 'Client Closed Request', headers: addCorsHeaders() });
+        }
+
         log('Request failed.', { message: error.message, name: error.name });
         return jsonResponse({ error: error.message, name: error.name }, 500);
     }
@@ -2815,29 +2857,77 @@ if (typeof Bun !== 'undefined') {
     const { createServer } = await import('node:http');
 
     createServer(async (req, res) => {
-        const chunks = [];
-
-        for await (const chunk of req) {
-            chunks.push(chunk);
-        }
-
-        const request = new Request(`http://${host}:${port}${req.url}`, {
-            method: req.method,
-            headers: req.headers,
-            body: chunks.length > 0 ? Buffer.concat(chunks) : undefined,
-            duplex: 'half',
-        });
-        const response = await handleRequest(request);
-
-        res.writeHead(response.status, response.statusText, Object.fromEntries(response.headers.entries()));
-
-        if (response.body) {
-            for await (const chunk of response.body) {
-                res.write(chunk);
+        const abortController = new AbortController();
+        const abortUpstream = () => {
+            if (!res.writableEnded) {
+                abortController.abort();
             }
-        }
+        };
+        req.on('aborted', abortUpstream);
+        res.on('close', abortUpstream);
 
-        res.end();
+        try {
+            const chunks = [];
+
+            for await (const chunk of req) {
+                chunks.push(chunk);
+            }
+
+            if (abortController.signal.aborted) {
+                return;
+            }
+
+            const request = new Request(`http://${host}:${port}${req.url}`, {
+                method: req.method,
+                headers: req.headers,
+                body: chunks.length > 0 ? Buffer.concat(chunks) : undefined,
+                duplex: 'half',
+                signal: abortController.signal,
+            });
+            const response = await handleRequest(request);
+
+            if (abortController.signal.aborted) {
+                return;
+            }
+
+            res.writeHead(response.status, response.statusText, Object.fromEntries(response.headers.entries()));
+
+            if (response.body) {
+                try {
+                    for await (const chunk of response.body) {
+                        if (abortController.signal.aborted || res.destroyed) {
+                            break;
+                        }
+
+                        if (!res.write(chunk)) {
+                            await waitForDrainOrAbort(res, abortController.signal);
+                        }
+                    }
+                } catch (error) {
+                    if (!isAbortError(error) && !abortController.signal.aborted && !res.destroyed) {
+                        throw error;
+                    }
+                }
+            }
+
+            if (!res.writableEnded && !res.destroyed) {
+                res.end();
+            }
+        } catch (error) {
+            if (!isAbortError(error) && !abortController.signal.aborted) {
+                log('Node server request failed.', { message: error.message, name: error.name });
+            }
+
+            if (!res.headersSent && !res.destroyed) {
+                res.writeHead(500, { 'content-type': 'application/json' });
+                res.end(JSON.stringify({ error: error.message, name: error.name }));
+            } else if (!res.writableEnded && !res.destroyed) {
+                res.end();
+            }
+        } finally {
+            req.off('aborted', abortUpstream);
+            res.off('close', abortUpstream);
+        }
     }).listen(port, host, () => {
         log(`Running at http://${host}:${port}`, { upstreamBaseUrl, cacheTtl: getCacheTtlLabel() });
     });
