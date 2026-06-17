@@ -228,7 +228,7 @@
       <section class="panel">
         <div class="log-toolbar">
           <div class="log-filters">
-            <label class="field"><span>上游统计</span><select id="filterCache"><option value="">全部</option><option value="hit">有缓存读取</option><option value="creation">有缓存写入</option><option value="none">未返回缓存用量</option><option value="unknown">未知</option></select></label>
+            <label class="field"><span>Usage</span><select id="filterCache"><option value="">全部</option><option value="hit">有缓存读取</option><option value="creation">有缓存写入</option><option value="none">未返回缓存用量</option><option value="unknown">未知</option></select></label>
             <label class="field"><span>每页</span><select id="pageSize"><option>10</option><option selected>20</option></select></label>
           </div>
           <div class="log-controls">
@@ -237,7 +237,7 @@
             <button id="clear" class="danger-light">清空</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>详情</th><th>时间</th><th>模型</th><th>状态</th><th>缓存注入</th><th>Prefix</th><th>上游统计</th><th>渠道</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>详情</th><th>时间</th><th>模型</th><th>状态</th><th>缓存注入</th><th>Prefix</th><th>Usage</th><th>渠道</th></tr></thead><tbody id="requestRows"></tbody></table></div>
         <div class="pagination"><button id="prevPage">上一页</button><span id="pageInfo">1 / 1</span><button id="nextPage">下一页</button></div>
       </section>
     </section>
@@ -302,6 +302,8 @@
       <div id="detailBodyTab">
         <div class="section-label action-label"><span>发给上游的最终请求体（按顺序）</span><span class="label-actions"><button class="ghost small" id="expandAllMessages">全部展开</button><button class="ghost small" id="collapseAllMessages">全部折叠</button></span></div>
         <div class="body-stream" id="detailBodyStream"></div>
+        <div class="section-label">Usage</div>
+        <pre class="usage-pre" id="detailUsagePre">暂无 usage。</pre>
       </div>
       <pre id="detailPre" hidden>暂无选择。</pre>
     </div>

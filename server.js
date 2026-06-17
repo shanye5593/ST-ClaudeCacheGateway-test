@@ -1696,6 +1696,42 @@ function setCaptureResponse(capture, upstreamResponse, text = null, json = null)
     };
 }
 
+function mergeCaptureUsage(capture, usage) {
+    if (!capture || !usage) {
+        return;
+    }
+
+    if (!capture.response) {
+        capture.response = { usage: null, cacheResult: 'unknown' };
+    }
+
+    const current = capture.response.usage || {};
+    const next = { ...current };
+
+    for (const [key, value] of Object.entries(usage)) {
+        if (value !== null && value !== undefined) {
+            next[key] = value;
+        }
+    }
+
+    capture.response.usage = next;
+    capture.response.cacheResult = getCacheResultFromUsage(next);
+}
+
+function mergeCaptureUsageFromSseJson(capture, json, mode) {
+    if (!capture || !json) {
+        return;
+    }
+
+    const usage = mode === 'anthropic'
+        ? json.usage || json.message?.usage
+        : json.usage;
+
+    if (usage) {
+        mergeCaptureUsage(capture, extractUsage({ usage }));
+    }
+}
+
 async function readJsonRequest(request) {
     const text = await request.text();
 
@@ -2068,7 +2104,7 @@ function convertAnthropicResponseToOpenAi(json, model) {
     };
 }
 
-function convertAnthropicSseLine(line, model) {
+function convertAnthropicSseLine(line, model, capture = null) {
     if (!line.startsWith('data: ')) {
         return line;
     }
@@ -2081,6 +2117,7 @@ function convertAnthropicSseLine(line, model) {
 
     try {
         const event = JSON.parse(data);
+        mergeCaptureUsageFromSseJson(capture, event, 'anthropic');
 
         if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             return `data: ${JSON.stringify({
@@ -2100,7 +2137,70 @@ function convertAnthropicSseLine(line, model) {
     return '';
 }
 
-function convertAnthropicStreamToOpenAi(stream, model) {
+function captureSseUsage(stream, capture, mode) {
+    if (!capture) {
+        return stream;
+    }
+
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = '';
+    let reader = null;
+
+    return new ReadableStream({
+        async start(controller) {
+            reader = stream.getReader();
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+
+                    if (done) {
+                        break;
+                    }
+
+                    const text = decoder.decode(value, { stream: true });
+                    buffer += text;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        const trimmed = line.trimEnd();
+
+                        if (!trimmed.startsWith('data: ')) {
+                            continue;
+                        }
+
+                        const data = trimmed.slice('data: '.length);
+
+                        if (data === '[DONE]') {
+                            continue;
+                        }
+
+                        try {
+                            mergeCaptureUsageFromSseJson(capture, JSON.parse(data), mode);
+                        } catch {}
+                    }
+
+                    controller.enqueue(encoder.encode(text));
+                }
+            } catch (error) {
+                if (error?.name !== 'AbortError') {
+                    throw error;
+                }
+            } finally {
+                try {
+                    controller.close();
+                } catch {}
+            }
+        },
+        cancel() {
+            return reader?.cancel().catch(() => {});
+        },
+    });
+}
+
+function convertAnthropicStreamToOpenAi(stream, model, capture = null) {
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
@@ -2123,7 +2223,7 @@ function convertAnthropicStreamToOpenAi(stream, model) {
                     buffer = lines.pop() || '';
 
                     for (const line of lines) {
-                        const converted = convertAnthropicSseLine(line.trimEnd(), model);
+                        const converted = convertAnthropicSseLine(line.trimEnd(), model, capture);
 
                         if (converted) {
                             controller.enqueue(encoder.encode(`${converted}\n\n`));
@@ -2182,7 +2282,7 @@ async function proxyChatCompletionsAnthropic(request, body, convertedBody, resul
             'cache-control': 'no-cache',
         }));
 
-        return new Response(convertAnthropicStreamToOpenAi(upstreamResponse.body, anthropicBody.model), {
+        return new Response(convertAnthropicStreamToOpenAi(upstreamResponse.body, anthropicBody.model, capture), {
             status: upstreamResponse.status,
             statusText: upstreamResponse.statusText,
             headers,
@@ -2311,7 +2411,7 @@ async function proxyAnthropicMessages(request) {
     if (convertedBody.stream) {
         setCaptureResponse(capture, upstreamResponse);
 
-        return new Response(upstreamResponse.body, {
+        return new Response(captureSseUsage(upstreamResponse.body, capture, 'anthropic'), {
             status: upstreamResponse.status,
             statusText: upstreamResponse.statusText,
             headers,
@@ -2400,7 +2500,7 @@ async function proxyChatCompletions(request) {
             'cache-control': upstreamResponse.headers.get('cache-control') || 'no-cache',
         }));
 
-        return new Response(upstreamResponse.body, {
+        return new Response(captureSseUsage(upstreamResponse.body, capture, 'openai'), {
             status: upstreamResponse.status,
             statusText: upstreamResponse.statusText,
             headers,

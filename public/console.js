@@ -115,6 +115,15 @@ function tokenLabel(value) {
   return value === null || value === undefined ? '-' : value;
 }
 
+function hasUsage(usage) {
+  return usage && Object.values(usage).some((value) => value !== null && value !== undefined);
+}
+
+function formatUsage(usage) {
+  if (!hasUsage(usage)) return '暂无 usage。';
+  return JSON.stringify(usage, null, 2);
+}
+
 function upstreamStatsLabel(item) {
   if (item?.responseStatus && item.responseStatus >= 400) return '请求失败';
   if (item?.cacheReadTokens !== null && item?.cacheReadTokens !== undefined) return '有缓存读取';
@@ -690,7 +699,7 @@ function renderRequests() {
     prefix.appendChild(document.createElement('br'));
     appendText(prefix, 'small', compactHash(item.prefixHash));
 
-    const stats = tableCell(tr, '', '', '上游统计');
+    const stats = tableCell(tr, '', '', 'Usage');
     appendText(stats, 'span', upstreamStatsLabel(item), `badge ${upstreamStatsClass(item)}`.trim());
     if (item.cacheReadTokens !== null || item.cacheWriteTokens !== null) {
       stats.appendChild(document.createElement('br'));
@@ -894,7 +903,7 @@ function renderDetail() {
     ['转换标记', item.gateway?.conversion?.removed ?? 0],
     ['缓存点数量', item.upstream?.cache?.cacheControlCount ?? 0],
     ['Prefix 动作', item.gateway?.prefixLock?.action || 'disabled'],
-    ['上游统计', usage.inputTokens || usage.cacheReadTokens || usage.cacheWriteTokens || usage.outputTokens ? '已返回' : '未返回'],
+    ['Usage', hasUsage(usage) ? '已返回' : '未返回'],
     ['当前渠道', channelName(state.runtime)],
   ]);
 
@@ -914,6 +923,7 @@ function renderDetail() {
   $('detailPre').hidden = showBody;
   if (showBody) {
     renderRequestBodyStream($('detailBodyStream'), item);
+    $('detailUsagePre').textContent = formatUsage(usage);
   } else {
     $('detailPre').textContent = JSON.stringify(tabPayloads[state.selectedTab] ?? tabPayloads.summary, null, 2);
   }
